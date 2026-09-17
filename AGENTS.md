@@ -86,3 +86,17 @@
 - 审查结果必须按严重程度和优先级排序，并包含具体证据或位置、实际影响和推荐方向。
 - 必须明确区分已确认的事实、基于证据的推断和可选优化，不得把个人偏好包装成缺陷。
 - 当任务仍然模糊时，应先提出 3 至 5 个最值得优先考虑的建议及其适用前提；当用户明确要求实现、修复、创建或改造后，再进入实施模式。
+
+## Agent skills
+
+### Issue tracker
+
+When creating, publishing, fetching, or planning issues and specs, use local Markdown files under `.scratch/<feature-slug>/`. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+When triaging an issue or applying a triage role, use the five default canonical labels. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Before exploring domain code, naming domain concepts, or proposing architecture changes, follow the single-context domain documentation layout. See `docs/agents/domain.md`.
