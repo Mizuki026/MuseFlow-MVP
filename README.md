@@ -46,6 +46,12 @@ The local endpoints are:
 - Private bucket: museflow-results
 
 The Compose init job creates the bucket and explicitly keeps it private. Local default credentials are only for this trusted development environment; never reuse them outside it.
+
+### 当前环境审核与窗口边界
+
+Docker Desktop、Docker Engine 和 Docker Compose 已可用；Redis 与 MinIO 已通过 Compose 启动并完成健康检查。第 1 窗口的业务代码保持 PostgreSQL、任务领域和 HTTP API 边界不变，不因为这些依赖已就绪而提前引入 Scheduler、Celery、Worker、Provider 或对象存储逻辑。
+
+`127.0.0.1:55432` 的隔离 PostgreSQL 只作为第 1 窗口集成测试的可复现测试数据库保留，不是 Redis 或 MinIO 的替代方案，也不与 Compose 依赖冲突。第 2 窗口可以直接使用 Compose 内部地址 `redis://redis:6379/0`；后续结果持久化窗口可以直接使用 `http://minio:9000` 和私有 bucket `museflow-results`。Provider 仍需显式配置和受控验证，不存在自动替代承诺。
 ## 前端环境
 
 前端使用 React、TypeScript、Vite、React Router、TanStack Query 和 React Hook Form；测试工具已安装 Vitest、Testing Library 和 Playwright。

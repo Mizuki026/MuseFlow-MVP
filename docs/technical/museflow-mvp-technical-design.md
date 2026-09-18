@@ -789,7 +789,7 @@ MuseFlow/
 - 已通过 20 个单元、集成和 API 测试，以及 Ruff、Pyright、Alembic check；
 - 已在空数据库上升级到 `0001_initial_task_persistence`，并完成最小 FastAPI 服务冒烟验证。
 
-下一步进入第 2 个实现窗口：实现 outbox Dispatcher、Redis/Celery 运输 Adapter、MockProvider 和异步成功纵向切片。本窗口尚未实现消息发布、Scheduler、Worker、Provider Adapter、attempt 或结果存储。
+下一步进入第 2 个实现窗口：实现 outbox Dispatcher、Redis/Celery 运输 Adapter、MockProvider 和异步成功纵向切片。本窗口尚未实现消息发布、Scheduler、Worker、Provider Adapter、attempt 或结果存储。当前 Docker/Compose、Redis 和 MinIO 已可用，第 2 窗口可直接使用 Compose 依赖；`127.0.0.1:55432` 隔离 PostgreSQL 仅继续作为第 1 窗口集成测试的可复现测试数据库。
 
 ## 24. 参考资料
 
