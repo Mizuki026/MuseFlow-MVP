@@ -10,6 +10,8 @@ services:
       interval: 2s
       timeout: 3s
       retries: 15
+    ports:
+      - "127.0.0.1:55432:5432"
     volumes:
       - museflow-postgres:/var/lib/postgresql/data
 
@@ -77,6 +79,41 @@ services:
         condition: service_completed_successfully
     ports:
       - "127.0.0.1:8000:8000"
+
+  scheduler:
+    build: ./backend
+    command: ["uv", "run", "--no-dev", "python", "-m", "museflow.scheduler"]
+    environment:
+      MUSEFLOW_DATABASE_URL: postgresql+psycopg://museflow:museflow@postgres:5432/museflow
+      REDIS_URL: redis://redis:6379/0
+      SCHEDULER_INTERVAL_SECONDS: "1"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "uv", "run", "--no-dev", "python", "-m", "museflow.scheduler", "--check-ready"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  worker:
+    build: ./backend
+    command: ["uv", "run", "--no-dev", "celery", "-A", "museflow.worker:celery_app", "worker", "--loglevel=INFO", "--concurrency=1"]
+    environment:
+      MUSEFLOW_DATABASE_URL: postgresql+psycopg://museflow:museflow@postgres:5432/museflow
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "uv", "run", "--no-dev", "python", "-m", "museflow.worker", "--check-ready"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
 
 volumes:
   museflow-postgres:

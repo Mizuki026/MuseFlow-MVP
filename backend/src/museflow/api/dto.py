@@ -6,6 +6,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict
 
 from museflow.tasks.domain import TaskStatus
+from museflow.tasks.execution_models import GenerationAttemptModel
 from museflow.tasks.repository import EventRecord, TaskRecord
 
 
@@ -23,6 +24,30 @@ class TaskEventResponse(BaseModel):
     @classmethod
     def from_record(cls, event: EventRecord) -> TaskEventResponse:
         return cls(id=event.id, type=event.event_type, created_at=event.created_at)
+
+
+class TaskAttemptResponse(BaseModel):
+    id: UUID
+    sequence: int
+    status: str
+    phase: str
+    provider_name: str
+    started_at: datetime
+    finished_at: datetime | None
+    result_digest: str | None
+
+    @classmethod
+    def from_model(cls, attempt: GenerationAttemptModel) -> TaskAttemptResponse:
+        return cls(
+            id=attempt.id,
+            sequence=attempt.sequence,
+            status=attempt.status,
+            phase=attempt.phase,
+            provider_name=attempt.provider_name,
+            started_at=attempt.started_at,
+            finished_at=attempt.finished_at,
+            result_digest=attempt.result_digest,
+        )
 
 
 class TaskSummaryResponse(BaseModel):
@@ -62,6 +87,7 @@ class TaskSummaryResponse(BaseModel):
 class TaskResponse(TaskSummaryResponse):
     idempotency_replayed: bool = False
     events: list[TaskEventResponse] = []
+    attempts: list[TaskAttemptResponse] = []
 
 
 class TaskListResponse(BaseModel):

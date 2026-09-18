@@ -19,6 +19,9 @@ from sqlalchemy.dialects.postgresql import UUID as PostgreSQLUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from museflow.db.base import Base
+from museflow.tasks.execution_models import GenerationAttemptModel
+
+_REGISTERED_GENERATION_ATTEMPT_MODEL = GenerationAttemptModel
 
 
 class GenerationTaskModel(Base):

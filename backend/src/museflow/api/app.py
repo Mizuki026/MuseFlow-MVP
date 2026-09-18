@@ -6,7 +6,7 @@ from uuid import UUID, uuid4
 from fastapi import FastAPI, Header, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session, sessionmaker
 from starlette.middleware.base import RequestResponseEndpoint
 from starlette.responses import Response
@@ -14,6 +14,7 @@ from starlette.responses import Response
 from museflow.api.dto import (
     CreateTaskBody,
     HealthResponse,
+    TaskAttemptResponse,
     TaskEventResponse,
     TaskListResponse,
     TaskResponse,
@@ -28,8 +29,9 @@ from museflow.tasks.application import (
     TaskNotFoundError,
 )
 from museflow.tasks.domain import CreateTaskRequest, DomainValidationError, TaskStatus
+from museflow.tasks.execution_models import GenerationAttemptModel
 
-EXPECTED_MIGRATION_REVISION = "0001_initial_task_persistence"
+EXPECTED_MIGRATION_REVISION = "0002_generation_attempts"
 DEFAULT_DATABASE_URL = "postgresql+psycopg://postgres:postgres@localhost:5432/museflow"
 
 
@@ -142,8 +144,19 @@ def create_app(
     def get_task_route(task_id: UUID) -> TaskResponse:
         detail = get_task_detail.execute(task_id)
         response = TaskSummaryResponse.from_record(detail.task)
+        with factory() as session:
+            attempts = list(
+                session.scalars(
+                    select(GenerationAttemptModel)
+                    .where(GenerationAttemptModel.task_id == task_id)
+                    .order_by(GenerationAttemptModel.sequence.asc())
+                )
+            )
         return _task_response(
-            TaskResponse(**response.model_dump()),
+            TaskResponse(
+                **response.model_dump(),
+                attempts=[TaskAttemptResponse.from_model(attempt) for attempt in attempts],
+            ),
             [TaskEventResponse.from_record(event) for event in detail.events],
         )
 
