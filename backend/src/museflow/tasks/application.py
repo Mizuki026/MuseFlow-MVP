@@ -7,9 +7,11 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
+from museflow.db.models import GenerationTaskModel
 from museflow.tasks.domain import (
     CreateTaskRequest,
     TaskPolicy,
@@ -17,6 +19,7 @@ from museflow.tasks.domain import (
     create_queued_task,
     normalize_create_request,
     request_fingerprint,
+    retry_is_allowed,
 )
 from museflow.tasks.repository import EventRecord, TaskRecord, TaskRepository
 
@@ -26,6 +29,10 @@ class IdempotencyConflictError(ValueError):
 
 
 class TaskNotFoundError(LookupError):
+    pass
+
+
+class ManualRetryNotAllowedError(ValueError):
     pass
 
 
@@ -86,22 +93,49 @@ class CreateTask:
         self._clock = clock or (lambda: datetime.now(UTC))
         self._id_factory = id_factory
 
-    def execute(self, request: CreateTaskRequest, idempotency_key: str) -> CreateTaskResult:
+    def execute(
+        self,
+        request: CreateTaskRequest,
+        idempotency_key: str,
+        *,
+        retried_from_task_id: UUID | None = None,
+    ) -> CreateTaskResult:
         normalized = normalize_create_request(request)
         fingerprint = request_fingerprint(normalized)
         existing = self._find_existing(idempotency_key)
         if existing is not None:
             return self._replay_or_conflict(existing, fingerprint)
 
+        created_at = self._clock()
         task = create_queued_task(
             task_id=self._id_factory(),
             idempotency_key=idempotency_key,
             request=normalized,
-            created_at=self._clock(),
+            created_at=created_at,
             policy=self._policy,
+            retried_from_task_id=retried_from_task_id,
         )
         try:
             with self._session_factory.begin() as session:
+                if retried_from_task_id is not None:
+                    source = session.get(
+                        GenerationTaskModel, retried_from_task_id, with_for_update=True
+                    )
+                    if source is None:
+                        raise TaskNotFoundError(str(retried_from_task_id))
+                    if source.status != TaskStatus.FAILED.value or not retry_is_allowed(
+                        source.error_code
+                    ):
+                        raise ManualRetryNotAllowedError(
+                            "this task is not eligible for manual retry"
+                        )
+                    child = session.scalar(
+                        select(GenerationTaskModel).where(
+                            GenerationTaskModel.retried_from_task_id == retried_from_task_id
+                        )
+                    )
+                    if child is not None:
+                        raise ManualRetryNotAllowedError("this task already has a manual retry")
                 created = self._repository.add_queued_task(session, task)
                 self._repository.add_creation_event(session, task)
                 self._repository.add_execution_outbox(session, task)

@@ -50,6 +50,15 @@ class TaskAttemptResponse(BaseModel):
         )
 
 
+class TaskAssetResponse(BaseModel):
+    id: UUID
+    role: str
+    content_type: str
+    size_bytes: int
+    sha256: str
+    download_url: str | None = None
+
+
 class TaskSummaryResponse(BaseModel):
     id: UUID
     prompt: str
@@ -64,6 +73,7 @@ class TaskSummaryResponse(BaseModel):
     next_attempt_at: datetime | None
     error_code: str | None
     error_message: str | None
+    retried_from_task_id: UUID | None
 
     @classmethod
     def from_record(cls, task: TaskRecord) -> TaskSummaryResponse:
@@ -81,6 +91,7 @@ class TaskSummaryResponse(BaseModel):
             next_attempt_at=task.next_attempt_at,
             error_code=task.error_code,
             error_message=task.error_message,
+            retried_from_task_id=task.retried_from_task_id,
         )
 
 
@@ -88,6 +99,8 @@ class TaskResponse(TaskSummaryResponse):
     idempotency_replayed: bool = False
     events: list[TaskEventResponse] = []
     attempts: list[TaskAttemptResponse] = []
+    result: TaskAssetResponse | None = None
+    retry_task_id: UUID | None = None
 
 
 class TaskListResponse(BaseModel):

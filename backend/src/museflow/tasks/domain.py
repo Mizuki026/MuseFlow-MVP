@@ -19,6 +19,7 @@ class TaskStatus(StrEnum):
 class DomainErrorCode(StrEnum):
     INVALID_PROMPT = "INVALID_PROMPT"
     INVALID_GENERATION_OPTIONS = "INVALID_GENERATION_OPTIONS"
+    RETRY_NOT_ALLOWED = "RETRY_NOT_ALLOWED"
 
 
 class DomainValidationError(ValueError):
@@ -61,6 +62,34 @@ class QueuedTask:
     deadline_at: datetime
     created_at: datetime
     queued_at: datetime
+    retried_from_task_id: UUID | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class RetryPolicy:
+    initial_delay_seconds: float = 2.0
+    multiplier: float = 2.0
+    max_delay_seconds: float = 30.0
+
+    def delay_seconds(self, sequence: int, random_value: float) -> float:
+        if sequence < 1 or not 0.0 <= random_value <= 1.0:
+            raise ValueError("invalid retry delay inputs")
+        base = min(
+            self.max_delay_seconds,
+            self.initial_delay_seconds * self.multiplier ** (sequence - 1),
+        )
+        return base * random_value
+
+
+def retry_is_allowed(error_code: str | None) -> bool:
+    return error_code in {
+        "PROVIDER_UNAVAILABLE",
+        "PROVIDER_RATE_LIMITED",
+        "PROVIDER_TIMEOUT",
+        "RESULT_STORAGE_ERROR",
+        "RETRY_EXHAUSTED",
+        "DEADLINE_EXCEEDED",
+    }
 
 
 def normalize_create_request(request: CreateTaskRequest) -> NormalizedCreateTaskRequest:
@@ -107,6 +136,7 @@ def create_queued_task(
     request: NormalizedCreateTaskRequest,
     created_at: datetime,
     policy: TaskPolicy,
+    retried_from_task_id: UUID | None = None,
 ) -> QueuedTask:
     if created_at.tzinfo is None:
         raise ValueError("created_at must be timezone-aware")
@@ -124,4 +154,5 @@ def create_queued_task(
         deadline_at=created_at + timedelta(seconds=policy.deadline_seconds),
         created_at=created_at,
         queued_at=created_at,
+        retried_from_task_id=retried_from_task_id,
     )

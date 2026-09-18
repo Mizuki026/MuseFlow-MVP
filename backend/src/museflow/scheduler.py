@@ -8,6 +8,7 @@ from museflow.db.session import create_session_factory
 from museflow.queue import CeleryTaskPublisher, create_celery_app
 from museflow.runtime import runtime_probe
 from museflow.tasks.dispatcher import OutboxDispatcher
+from museflow.tasks.recovery import RecoverExpiredLeases, ScheduleDueRetries
 
 
 def run_scheduler() -> None:
@@ -20,7 +21,12 @@ def run_scheduler() -> None:
     dispatcher = OutboxDispatcher(
         create_session_factory(database_url), CeleryTaskPublisher(celery_app)
     )
+    factory = create_session_factory(database_url)
+    retries = ScheduleDueRetries(factory)
+    leases = RecoverExpiredLeases(factory)
     while True:
+        retries.run_once()
+        leases.run_once()
         dispatcher.dispatch_once()
         time.sleep(interval)
 

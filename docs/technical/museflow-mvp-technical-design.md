@@ -786,10 +786,13 @@ MuseFlow/
 - 阶段 0 Provider 可行性探针已完成，选定北京地域 `wan2.6-t2i`，并记录外部 exactly-once 降级承诺；
 - 第 1 个实现窗口已完成任务领域规则、PostgreSQL 三表持久化、Alembic migration、创建/详情/历史 API 和 HTTP 幂等；
 - 已使用真实 PostgreSQL 验证同事务写入、唯一约束、并发创建、事务回滚和稳定 cursor；
-- 已通过 20 个单元、集成和 API 测试，以及 Ruff、Pyright、Alembic check；
-- 已在空数据库上升级到 `0001_initial_task_persistence`，并完成最小 FastAPI 服务冒烟验证。
+- 已通过第 1、2 窗口的领域、API、PostgreSQL、Redis/Celery 集成测试，以及 Ruff、Pyright 和 Alembic check；
+- 已完成第 3 窗口阶段 A：数据库驱动的临时/永久错误分类、指数退避、`next_attempt_at`、attempt lease、过期接管、execution token fencing、任务截止时间、Worker 恢复和线性手动重试；
+- 已完成第 3 窗口阶段 B：`ResultAssetStore`、MinIO Adapter、确定性对象键、PNG/JPEG/WEBP 文件校验、大小限制、SHA-256、私有 bucket、短期签名下载和结果 DTO；
+- 已完成 API、Scheduler、Worker 的分离 readiness，并在真实 Compose Redis、PostgreSQL 和 MinIO 上验证成功链路、私有访问和签名 URL 过期；
+- 当前迁移已升级到 `0003_retries_and_result_assets`，后端全量测试为 `30 passed, 1 skipped`。
 
-下一步进入第 2 个实现窗口：实现 outbox Dispatcher、Redis/Celery 运输 Adapter、MockProvider 和异步成功纵向切片。本窗口尚未实现消息发布、Scheduler、Worker、Provider Adapter、attempt 或结果存储。当前 Docker/Compose、Redis 和 MinIO 已可用，第 2 窗口可直接使用 Compose 依赖；`127.0.0.1:55432` 隔离 PostgreSQL 仅继续作为第 1 窗口集成测试的可复现测试数据库。
+下一步进入第 5 个窗口：实现正式前端的创建、详情、历史页面及轮询、时间线和手动重试交互。真实 Provider Adapter、受控真实 Provider 冒烟测试、前端 Playwright 和交付收尾留到第 6 个窗口。当前版本仍不承诺公网部署、外部 Provider exactly-once 或前端正式功能。
 
 ## 24. 参考资料
 

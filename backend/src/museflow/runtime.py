@@ -6,6 +6,7 @@ from typing import Any, cast
 from redis import Redis  # pyright: ignore[reportMissingTypeStubs]
 from sqlalchemy import text
 
+from museflow.assets import MinioResultAssetStore
 from museflow.db.session import create_session_factory
 
 
@@ -28,6 +29,15 @@ def check_runtime_dependencies() -> None:
 def runtime_probe() -> int:
     try:
         check_runtime_dependencies()
+    except Exception:
+        return 1
+    return 0
+
+
+def worker_runtime_probe() -> int:
+    try:
+        check_runtime_dependencies()
+        MinioResultAssetStore().check_ready()
     except Exception:
         return 1
     return 0
