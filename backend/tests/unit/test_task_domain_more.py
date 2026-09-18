@@ -35,6 +35,10 @@ def test_request_fingerprint_uses_normalized_defaults_without_rewriting_prompt()
         CreateTaskRequest(prompt="  same text  ", size_preset="1280*1280", image_count=1)
     )
     different_prompt = normalize_create_request(CreateTaskRequest(prompt="same text"))
+    demo_profile = normalize_create_request(
+        CreateTaskRequest(prompt="  same text  ", execution_profile="permanent_failure")
+    )
 
     assert request_fingerprint(with_defaults) == request_fingerprint(explicit_defaults)
     assert request_fingerprint(with_defaults) != request_fingerprint(different_prompt)
+    assert request_fingerprint(with_defaults) != request_fingerprint(demo_profile)

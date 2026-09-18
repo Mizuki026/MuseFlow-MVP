@@ -1,32 +1,21 @@
-# React + TypeScript + Vite
+# MuseFlow frontend
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+正式前端提供三个路由：
 
-Currently, two official plugins are available:
+- `/tasks/new`：创建单图、1280 × 1280 任务；
+- `/tasks/:taskId`：状态、attempt、错误、时间线、重试和结果下载；
+- `/tasks`：cursor 分页、状态筛选和任务卡片。
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+本地 API 默认地址为 `http://127.0.0.1:8000/api/v1`，可通过 `.env` 中的 `VITE_API_BASE_URL` 覆盖。前端只使用后端返回的稳定下载路径，不保存或记录 MinIO 签名 URL。
 
-## React Compiler
+常用命令：
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+    npm run generate:api
+    npm run dev
+    npm run build
+    npm run typecheck
+    npm test
+    npm run lint
+    npm run test:e2e
 
-## Expanding the Oxlint configuration
-
-If you are developing a production application, we recommend enabling type-aware lint rules by installing `oxlint-tsgolint` and editing `.oxlintrc.json`:
-
-```json
-{
-  "$schema": "./node_modules/oxlint/configuration_schema.json",
-  "plugins": ["react", "typescript", "oxc"],
-  "options": {
-    "typeAware": true
-  },
-  "rules": {
-    "react/rules-of-hooks": "error",
-    "react/only-export-components": ["warn", { "allowConstantExport": true }]
-  }
-}
-```
-
-See the [Oxlint rules documentation](https://oxc.rs/docs/guide/usage/linter/rules) for the full list of rules and categories.
+`generate:api` 从 FastAPI OpenAPI 输出重新生成 `src/api/schema.generated.ts`。Playwright 流程要求 Compose 的 API、PostgreSQL、Redis、Worker、Scheduler 和 MinIO 已启动，并使用 Demo-only MockProvider 场景；普通测试不会调用真实 Provider。

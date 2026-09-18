@@ -9,7 +9,7 @@ from sqlalchemy import delete, select
 
 from museflow.db.models import GenerationTaskModel, OutboxMessageModel, TaskEventModel
 from museflow.db.session import create_session_factory
-from museflow.providers import GenerationRequest, MockProvider
+from museflow.providers import GenerationRequest, MockProvider, ProviderError
 from museflow.tasks.application import CreateTask
 from museflow.tasks.dispatcher import OutboxDispatcher
 from museflow.tasks.domain import CreateTaskRequest, TaskStatus
@@ -68,6 +68,18 @@ def test_mock_provider_success_contract_is_deterministic() -> None:
     assert first == second
     assert first.provider_name == "mock"
     assert first.result_digest == "mock-result-stable-key"
+
+
+def test_mock_provider_scenarios_are_deterministic_by_attempt() -> None:
+    request = GenerationRequest(prompt="recovery", size_preset="1280*1280")
+    provider = MockProvider(scenario="transient_then_success")
+
+    with pytest.raises(ProviderError) as first:
+        provider.generate(request, request_key="task:attempt:1", remote_request_id=None)
+    result = provider.generate(request, request_key="task:attempt:2", remote_request_id=None)
+
+    assert first.value.code == "PROVIDER_UNAVAILABLE"
+    assert result.provider_name == "mock"
 
 
 def test_dispatcher_retries_unpublished_outbox_after_redis_failure(

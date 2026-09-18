@@ -9,10 +9,13 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session, sessionmaker
 from starlette.middleware.base import RequestResponseEndpoint
+from starlette.middleware.cors import CORSMiddleware
 from starlette.responses import RedirectResponse, Response
 
 from museflow.api.dto import (
     CreateTaskBody,
+    DemoCreateTaskBody,
+    ErrorResponse,
     HealthResponse,
     TaskAssetResponse,
     TaskAttemptResponse,
@@ -35,7 +38,7 @@ from museflow.tasks.application import (
 from museflow.tasks.domain import CreateTaskRequest, DomainValidationError, TaskStatus
 from museflow.tasks.execution_models import GenerationAttemptModel
 
-EXPECTED_MIGRATION_REVISION = "0003_retries_and_result_assets"
+EXPECTED_MIGRATION_REVISION = "0004_demo_execution_profiles"
 DEFAULT_DATABASE_URL = "postgresql+psycopg://postgres:postgres@localhost:5432/museflow"
 
 
@@ -78,6 +81,7 @@ def create_app(
     database_url: str | None = None,
     ready_revision: str = EXPECTED_MIGRATION_REVISION,
     asset_store: ResultAssetStore | None = None,
+    demo_mode: bool | None = None,
 ) -> FastAPI:
     factory = session_factory or create_session_factory(
         database_url or os.environ.get("MUSEFLOW_DATABASE_URL", DEFAULT_DATABASE_URL)
@@ -88,6 +92,19 @@ def create_app(
     result_assets = asset_store or MinioResultAssetStore()
 
     app = FastAPI(title="MuseFlow API", version="0.1.0")
+    allowed_origins = os.environ.get(
+        "MUSEFLOW_CORS_ORIGINS",
+        (
+            "http://127.0.0.1:5173,http://localhost:5173,"
+            "http://127.0.0.1:4173,http://localhost:4173"
+        ),
+    )
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=[origin.strip() for origin in allowed_origins.split(",") if origin.strip()],
+        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_headers=["Content-Type", "Idempotency-Key", "X-Request-ID"],
+    )
 
     @app.middleware("http")
     async def add_request_id(request: Request, call_next: RequestResponseEndpoint) -> Response:
@@ -133,7 +150,12 @@ def create_app(
     async def handle_value_error(request: Request, error: ValueError) -> JSONResponse:
         return _error_response(request, ApiError(400, "INVALID_REQUEST", str(error)))
 
-    @app.post("/api/v1/tasks", response_model=TaskResponse, status_code=201)
+    @app.post(
+        "/api/v1/tasks",
+        response_model=TaskResponse,
+        status_code=201,
+        responses={409: {"model": ErrorResponse}, 422: {"model": ErrorResponse}},
+    )
     def create_task_route(
         body: CreateTaskBody,
         idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
@@ -152,7 +174,41 @@ def create_app(
             ).model_dump(mode="json"),
         )
 
-    @app.get("/api/v1/tasks/{task_id}", response_model=TaskResponse)
+    enabled_demo_mode = demo_mode
+    if enabled_demo_mode is None:
+        enabled_demo_mode = os.environ.get("MUSEFLOW_DEMO_MODE", "false").lower() == "true"
+    if enabled_demo_mode:
+
+        @app.post(
+            "/api/v1/demo/tasks",
+            response_model=TaskResponse,
+            status_code=201,
+            responses={409: {"model": ErrorResponse}, 422: {"model": ErrorResponse}},
+        )
+        def create_demo_task_route(
+            body: DemoCreateTaskBody,
+            idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+        ) -> JSONResponse:
+            if not idempotency_key:
+                raise ApiError(400, "IDEMPOTENCY_KEY_REQUIRED", "Idempotency-Key is required")
+            result = create_task.execute(
+                CreateTaskRequest(prompt=body.prompt, execution_profile=body.scenario.value),
+                idempotency_key=idempotency_key,
+            )
+            response = TaskSummaryResponse.from_record(result.task)
+            return JSONResponse(
+                status_code=200 if result.idempotency_replayed else 201,
+                content=TaskResponse(
+                    **response.model_dump(mode="json"),
+                    idempotency_replayed=result.idempotency_replayed,
+                ).model_dump(mode="json"),
+            )
+
+    @app.get(
+        "/api/v1/tasks/{task_id}",
+        response_model=TaskResponse,
+        responses={404: {"model": ErrorResponse}},
+    )
     def get_task_route(task_id: UUID) -> TaskResponse:
         detail = get_task_detail.execute(task_id)
         response = TaskSummaryResponse.from_record(detail.task)
@@ -204,7 +260,11 @@ def create_app(
             raise ApiError(400, "IDEMPOTENCY_KEY_REQUIRED", "Idempotency-Key is required")
         source = get_task_detail.execute(task_id)
         result = create_task.execute(
-            CreateTaskRequest(prompt=source.task.prompt, size_preset=source.task.size_preset),
+            CreateTaskRequest(
+                prompt=source.task.prompt,
+                size_preset=source.task.size_preset,
+                execution_profile=source.task.execution_profile,
+            ),
             idempotency_key,
             retried_from_task_id=task_id,
         )
@@ -240,8 +300,29 @@ def create_app(
         status: TaskStatus | None = None,
     ) -> TaskListResponse:
         page = list_tasks.execute(limit=limit, cursor=cursor, status=status)
+        task_ids = [task.id for task in page.items]
+        with factory() as session:
+            assets = list(
+                session.scalars(
+                    select(ResultAssetModel).where(
+                        ResultAssetModel.task_id.in_(task_ids),
+                        ResultAssetModel.role == "RESULT",
+                    )
+                )
+            )
+        thumbnails = {
+            asset.task_id: f"/api/v1/assets/{asset.id}/download" for asset in assets
+        }
         return TaskListResponse(
-            items=[TaskSummaryResponse.from_record(task) for task in page.items],
+            items=[
+                TaskSummaryResponse(
+                    **TaskSummaryResponse.from_record(task).model_dump(
+                        exclude={"thumbnail_url"}
+                    ),
+                    thumbnail_url=thumbnails.get(task.id),
+                )
+                for task in page.items
+            ],
             next_cursor=page.next_cursor,
         )
 

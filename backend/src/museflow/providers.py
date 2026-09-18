@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Protocol
 
 
@@ -53,13 +54,27 @@ class GenerationProvider(Protocol):
     ) -> GenerationResult: ...
 
 
+class MockScenario(StrEnum):
+    SUCCESS = "success"
+    TRANSIENT_THEN_SUCCESS = "transient_then_success"
+    RATE_LIMITED = "rate_limited"
+    TIMEOUT = "timeout"
+    PERMANENT_FAILURE = "permanent_failure"
+
+
 class MockProvider:
     _PNG_1X1 = base64.b64decode(
         "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
     )
 
-    def __init__(self, failures: list[ProviderError] | None = None) -> None:
+    def __init__(
+        self,
+        failures: list[ProviderError] | None = None,
+        *,
+        scenario: MockScenario | str = MockScenario.SUCCESS,
+    ) -> None:
         self._failures = list(failures or [])
+        self._scenario = MockScenario(scenario)
 
     def generate(
         self,
@@ -70,6 +85,18 @@ class MockProvider:
     ) -> GenerationResult:
         if self._failures:
             raise self._failures.pop(0)
+        if self._scenario is MockScenario.TRANSIENT_THEN_SUCCESS:
+            sequence = int(request_key.rsplit(":attempt:", maxsplit=1)[-1])
+            if sequence == 1:
+                raise TransientProviderError(
+                    "PROVIDER_UNAVAILABLE", "mock provider is recovering"
+                )
+        if self._scenario is MockScenario.RATE_LIMITED:
+            raise TransientProviderError("PROVIDER_RATE_LIMITED", "mock provider rate limited")
+        if self._scenario is MockScenario.TIMEOUT:
+            raise TransientProviderError("PROVIDER_TIMEOUT", "mock provider timed out")
+        if self._scenario is MockScenario.PERMANENT_FAILURE:
+            raise PermanentProviderError("PROVIDER_REJECTED", "mock provider rejected request")
         digest = hashlib.sha256(
             f"{request.prompt}\n{request.size_preset}\n{request_key}".encode()
         ).hexdigest()

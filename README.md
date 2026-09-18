@@ -59,12 +59,15 @@ Docker Desktop、Docker Engine 和 Docker Compose 已可用；Redis 与 MinIO �
 在 frontend 目录运行：
 
     npm run dev
+    npm run generate:api
     npm run build
     npm run typecheck
     npm test
     npm run lint
+    npm run test:e2e
 
 frontend/.env 已配置本机 API 地址 http://127.0.0.1:8000/api/v1，并由 Git 忽略。
+正式前端提供 `/tasks/new`、`/tasks/:taskId` 和 `/tasks`。前端类型由 FastAPI OpenAPI 生成；Playwright 使用显式启用的 Demo API 和确定性 MockProvider，不调用真实 Provider。
 ## 后续环境
 
 - Scheduler/Worker 窗口可直接使用已启动的 Redis，并读取 REDIS_URL。

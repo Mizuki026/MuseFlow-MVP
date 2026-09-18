@@ -32,6 +32,7 @@ class TaskRecord:
     completed_at: datetime | None
     version: int
     retried_from_task_id: UUID | None
+    execution_profile: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,6 +75,7 @@ def _task_record(model: GenerationTaskModel) -> TaskRecord:
         completed_at=model.completed_at,
         version=model.version,
         retried_from_task_id=model.retried_from_task_id,
+        execution_profile=model.execution_profile,
     )
 
 
@@ -121,6 +123,7 @@ class TaskRepository:
             queued_at=task.queued_at,
             version=1,
             retried_from_task_id=task.retried_from_task_id,
+            execution_profile=task.execution_profile,
         )
         session.add(model)
         session.flush()

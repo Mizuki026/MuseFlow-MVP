@@ -790,9 +790,12 @@ MuseFlow/
 - 已完成第 3 窗口阶段 A：数据库驱动的临时/永久错误分类、指数退避、`next_attempt_at`、attempt lease、过期接管、execution token fencing、任务截止时间、Worker 恢复和线性手动重试；
 - 已完成第 3 窗口阶段 B：`ResultAssetStore`、MinIO Adapter、确定性对象键、PNG/JPEG/WEBP 文件校验、大小限制、SHA-256、私有 bucket、短期签名下载和结果 DTO；
 - 已完成 API、Scheduler、Worker 的分离 readiness，并在真实 Compose Redis、PostgreSQL 和 MinIO 上验证成功链路、私有访问和签名 URL 过期；
-- 当前迁移已升级到 `0003_retries_and_result_assets`，后端全量测试为 `30 passed, 1 skipped`。
+- 第 4 个实现窗口已完成正式 React 前端：创建、详情、历史、非终态轮询、cursor 分页、状态筛选、事件时间线、错误展示、手动重试和稳定结果下载入口；
+- 前端状态与错误契约由 FastAPI OpenAPI 生成，服务端状态由 TanStack Query 管理，创建与重试使用稳定的业务提交幂等键；
+- 已补齐仅在 Demo 模式注册的场景任务入口、内部 execution profile、受信本地 CORS 和历史缩略图契约，并通过真实 Compose MockProvider Playwright 流程验证成功、临时恢复、永久失败、手动重试、分页、筛选、下载和刷新恢复；
+- 当前迁移已升级到 `0004_demo_execution_profiles`；本窗口验证结果为后端 `33 passed, 1 skipped`、前端 Vitest `17 passed`、Playwright `4 passed`，前端 build/typecheck/lint、Ruff、Pyright、Alembic check、Compose config 和 diff check 均通过。
 
-下一步进入第 5 个窗口：实现正式前端的创建、详情、历史页面及轮询、时间线和手动重试交互。真实 Provider Adapter、受控真实 Provider 冒烟测试、前端 Playwright 和交付收尾留到第 6 个窗口。当前版本仍不承诺公网部署、外部 Provider exactly-once 或前端正式功能。
+下一步进入第 5 个窗口，仅剩实现真实 Provider Adapter 和运行受控真实 Provider 冒烟测试。当前版本仍不承诺公网部署或外部 Provider exactly-once。
 
 ## 24. 参考资料
 

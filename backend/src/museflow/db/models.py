@@ -58,6 +58,7 @@ class GenerationTaskModel(Base):
         PostgreSQLUUID(as_uuid=True),
         ForeignKey("generation_tasks.id", ondelete="SET NULL"),
     )
+    execution_profile: Mapped[str | None] = mapped_column(String(64))
 
 
 class ResultAssetModel(Base):

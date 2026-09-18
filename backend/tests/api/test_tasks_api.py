@@ -81,6 +81,49 @@ def test_create_validation_and_missing_key_use_stable_errors(client: TestClient)
     assert invalid_prompt.json()["error"]["code"] == "INVALID_PROMPT"
 
 
+def test_demo_route_is_opt_in_and_keeps_execution_profile_internal() -> None:
+    database_url = os.environ.get("MUSEFLOW_TEST_DATABASE_URL")
+    if not database_url:
+        pytest.skip("MUSEFLOW_TEST_DATABASE_URL is required for API tests")
+    session_factory = create_session_factory(database_url)
+    hidden = TestClient(create_app(session_factory=session_factory, demo_mode=False))
+    enabled = TestClient(create_app(session_factory=session_factory, demo_mode=True))
+
+    assert hidden.post(
+        "/api/v1/demo/tasks",
+        headers={"Idempotency-Key": f"hidden-{uuid4()}"},
+        json={"prompt": "hidden", "scenario": "success"},
+    ).status_code == 404
+
+    response = enabled.post(
+        "/api/v1/demo/tasks",
+        headers={"Idempotency-Key": f"demo-{uuid4()}"},
+        json={"prompt": "temporary recovery", "scenario": "transient_then_success"},
+    )
+
+    assert response.status_code == 201
+    body = response.json()
+    assert body["status"] == "QUEUED"
+    assert "execution_profile" not in body
+    with session_factory() as session:
+        task = session.get(GenerationTaskModel, body["id"])
+    assert task is not None
+    assert task.execution_profile == "transient_then_success"
+
+
+def test_openapi_exposes_generated_status_and_error_contract(client: TestClient) -> None:
+    schema = client.get("/openapi.json").json()
+
+    assert schema["components"]["schemas"]["TaskStatus"]["enum"] == [
+        "QUEUED",
+        "RUNNING",
+        "RETRY_WAIT",
+        "SUCCEEDED",
+        "FAILED",
+    ]
+    assert "ErrorResponse" in schema["components"]["schemas"]
+
+
 def test_detail_history_and_not_found_are_available(client: TestClient) -> None:
     created = client.post(
         "/api/v1/tasks",

@@ -5,6 +5,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict
 
+from museflow.providers import MockScenario
 from museflow.tasks.domain import TaskStatus
 from museflow.tasks.execution_models import GenerationAttemptModel
 from museflow.tasks.repository import EventRecord, TaskRecord
@@ -14,6 +15,20 @@ class CreateTaskBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     prompt: str
+
+
+class DemoCreateTaskBody(CreateTaskBody):
+    scenario: MockScenario
+
+
+class ApiErrorDetail(BaseModel):
+    code: str
+    message: str
+    request_id: str
+
+
+class ErrorResponse(BaseModel):
+    error: ApiErrorDetail
 
 
 class TaskEventResponse(BaseModel):
@@ -74,6 +89,7 @@ class TaskSummaryResponse(BaseModel):
     error_code: str | None
     error_message: str | None
     retried_from_task_id: UUID | None
+    thumbnail_url: str | None = None
 
     @classmethod
     def from_record(cls, task: TaskRecord) -> TaskSummaryResponse:

@@ -33,6 +33,7 @@ class CreateTaskRequest:
     prompt: str
     size_preset: str | None = None
     image_count: int | None = None
+    execution_profile: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,6 +41,7 @@ class NormalizedCreateTaskRequest:
     prompt: str
     size_preset: str
     image_count: int
+    execution_profile: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,6 +65,7 @@ class QueuedTask:
     created_at: datetime
     queued_at: datetime
     retried_from_task_id: UUID | None = None
+    execution_profile: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,16 +115,20 @@ def normalize_create_request(request: CreateTaskRequest) -> NormalizedCreateTask
         prompt=request.prompt,
         size_preset="1280*1280",
         image_count=1,
+        execution_profile=request.execution_profile,
     )
 
 
 def request_fingerprint(request: NormalizedCreateTaskRequest) -> str:
+    payload: dict[str, str | int] = {
+        "image_count": request.image_count,
+        "prompt": request.prompt,
+        "size_preset": request.size_preset,
+    }
+    if request.execution_profile is not None:
+        payload["execution_profile"] = request.execution_profile
     canonical_request = json.dumps(
-        {
-            "image_count": request.image_count,
-            "prompt": request.prompt,
-            "size_preset": request.size_preset,
-        },
+        payload,
         ensure_ascii=False,
         separators=(",", ":"),
         sort_keys=True,
@@ -155,4 +162,5 @@ def create_queued_task(
         created_at=created_at,
         queued_at=created_at,
         retried_from_task_id=retried_from_task_id,
+        execution_profile=request.execution_profile,
     )

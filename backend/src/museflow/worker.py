@@ -8,6 +8,7 @@ from celery import Celery  # pyright: ignore[reportMissingTypeStubs]
 from sqlalchemy.orm import Session, sessionmaker
 
 from museflow.assets import MinioResultAssetStore
+from museflow.db.models import GenerationTaskModel
 from museflow.db.session import create_session_factory
 from museflow.providers import MockProvider
 from museflow.queue import create_celery_app
@@ -27,8 +28,14 @@ def _session_factory() -> sessionmaker[Session]:
 
 @celery_app.task(name="museflow.execute_task", ignore_result=True)  # pyright: ignore[reportUntypedFunctionDecorator,reportUnknownMemberType]
 def execute_task(task_id: str) -> None:
+    factory = _session_factory()
+    with factory() as session:
+        task = session.get(GenerationTaskModel, UUID(task_id))
+        scenario = (
+            task.execution_profile if task is not None and task.execution_profile else "success"
+        )
     ExecuteGenerationAttempt(
-        _session_factory(), MockProvider(), asset_store=MinioResultAssetStore()
+        factory, MockProvider(scenario=scenario), asset_store=MinioResultAssetStore()
     ).execute(UUID(task_id))
 
 
