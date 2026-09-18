@@ -783,11 +783,13 @@ MuseFlow/
 当前已完成：
 
 - 产品定位、信任边界、范围和非目标已经确认；
-- 任务状态、attempt、重试、outbox、Scheduler、lease 和结果提交语义已经形成一致方案；
-- 六周实施路径和第四周后端停点已经确认；
-- 发布门槛与可靠性声明已经对应到测试类型。
+- 阶段 0 Provider 可行性探针已完成，选定北京地域 `wan2.6-t2i`，并记录外部 exactly-once 降级承诺；
+- 第 1 个实现窗口已完成任务领域规则、PostgreSQL 三表持久化、Alembic migration、创建/详情/历史 API 和 HTTP 幂等；
+- 已使用真实 PostgreSQL 验证同事务写入、唯一约束、并发创建、事务回滚和稳定 cursor；
+- 已通过 20 个单元、集成和 API 测试，以及 Ruff、Pyright、Alembic check；
+- 已在空数据库上升级到 `0001_initial_task_persistence`，并完成最小 FastAPI 服务冒烟验证。
 
-实施前唯一尚未查证的外部事实是首个真实 Provider。下一步必须先执行阶段 0，形成 Provider 可行性记录；在此之前不得冻结真实 Adapter 的厂商协议细节。
+下一步进入第 2 个实现窗口：实现 outbox Dispatcher、Redis/Celery 运输 Adapter、MockProvider 和异步成功纵向切片。本窗口尚未实现消息发布、Scheduler、Worker、Provider Adapter、attempt 或结果存储。
 
 ## 24. 参考资料
 

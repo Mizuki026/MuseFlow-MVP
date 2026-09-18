@@ -34,7 +34,7 @@ target-version = "py313"
 select = ["E", "F", "I", "B", "UP"]
 
 [tool.pyright]
-include = ["src", "tests"]
+include = ["src"]
 venvPath = "."
 venv = ".venv"
 typeCheckingMode = "strict"

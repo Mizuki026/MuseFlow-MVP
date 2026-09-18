@@ -64,7 +64,7 @@ class QueuedTask:
 
 
 def normalize_create_request(request: CreateTaskRequest) -> NormalizedCreateTaskRequest:
-    if not isinstance(request.prompt, str) or not request.prompt.strip():
+    if not request.prompt.strip():
         raise DomainValidationError(
             DomainErrorCode.INVALID_PROMPT,
             "prompt must contain at least one non-whitespace character",

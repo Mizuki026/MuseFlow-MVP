@@ -1,0 +1,15 @@
+# Local secrets and environment overrides
+.env
+.env.*
+!.env.example
+
+# Python environments and generated files
+backend/.venv/
+**/__pycache__/
+**/.pytest_cache/
+**/.ruff_cache/
+**/.pyright/
+
+# Local PostgreSQL integration-test instance
+.scratch/museflow-pg-test/
+.scratch/museflow-pg-test.log
