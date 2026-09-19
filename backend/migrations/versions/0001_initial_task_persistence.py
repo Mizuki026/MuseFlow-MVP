@@ -4,17 +4,16 @@ Revision ID: 0001_initial_task_persistence
 Revises:
 Create Date: 2026-09-18
 """
-from typing import Sequence, Union
+from collections.abc import Sequence
 
-from alembic import op
 import sqlalchemy as sa
+from alembic import op
 from sqlalchemy.dialects import postgresql
 
-
 revision: str = "0001_initial_task_persistence"
-down_revision: Union[str, Sequence[str], None] = None
-branch_labels: Union[str, Sequence[str], None] = None
-depends_on: Union[str, Sequence[str], None] = None
+down_revision: str | Sequence[str] | None = None
+branch_labels: str | Sequence[str] | None = None
+depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
@@ -45,7 +44,11 @@ def upgrade() -> None:
         sa.UniqueConstraint("idempotency_key", name="uq_generation_tasks_idempotency_key"),
     )
     op.create_index("ix_generation_tasks_history", "generation_tasks", ["created_at", "id"])
-    op.create_index("ix_generation_tasks_status_history", "generation_tasks", ["status", "created_at", "id"])
+    op.create_index(
+        "ix_generation_tasks_status_history",
+        "generation_tasks",
+        ["status", "created_at", "id"],
+    )
     op.create_table(
         "task_events",
         sa.Column("id", postgresql.UUID(as_uuid=True), nullable=False),
@@ -69,7 +72,11 @@ def upgrade() -> None:
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint("aggregate_id", "message_type", name="uq_outbox_aggregate_message"),
     )
-    op.create_index("ix_outbox_available", "outbox_messages", ["published_at", "available_at", "created_at"])
+    op.create_index(
+        "ix_outbox_available",
+        "outbox_messages",
+        ["published_at", "available_at", "created_at"],
+    )
 
 
 def downgrade() -> None:
