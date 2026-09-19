@@ -1,6 +1,6 @@
 # MuseFlow MVP 图片生成 Provider 可行性记录
 
-> 当前判定（2026-09-19）：第 1、12、13 节保留各阶段的历史快照；最新核查见第 14 节。真实 Provider E2E 尚未完成，不满足第 6 窗口前置条件。
+> 当前判定（2026-09-19）：第 1、12、13 节保留各阶段的历史快照；最新核查见第 15 节。真实 Provider E2E 尚未完成，不满足第 6 窗口前置条件。
 
 ## 1. 调查范围与结论状态
 
@@ -395,3 +395,11 @@
 合法尾随点形式也逐个离线比对，均不匹配。[Wan2.6 官方响应样例](https://help.aliyun.com/en/model-studio/wan-image-generation-api-reference)中的北京和上海精确结果主机均包含在上表，也不匹配。当前证据无法确定实际结果主机的明文、官方归属或适用地域；白名单维持不变，真实 Provider E2E 仍未完成。若要解锁，需要提供不含签名参数的可信主机证据及其官方归属证明，或由厂商确认该摘要对应的精确结果主机；不得为猜测再次生成图片。
 
 受控 smoke 现已具备单次 Provider 结果下载后的 MinIO 私有写入、签名下载 200、匿名 403 和过期 403 验收路径。下一次真实请求前必须先轮换已在截图中暴露片段的 API Key，并重新取得该次明确授权。
+
+## 15. 第 5 个窗口结果主机摘要的官方来源复核（2026-09-19）
+
+对阿里云[万相 2.7 图生视频 API 参考](https://help.aliyun.com/zh/model-studio/image-to-video-general-api-reference)成功响应样例中的精确主机 `dashscope-a717.oss-accelerate.aliyuncs.com` 离线计算 `SHA-256(lowercase(urlparse.hostname))[:12]`，得到 `0bd1575e39cb`，与第 14 节保存的摘要相同。官方样例明确列出该 HTTPS 主机，但结果是 MP4 视频；12 位十六进制摘要也不是可逆、唯一的主机证明，因此这只能确定一个命中的官方候选，不能还原原始结果 URL 的主机。
+
+**地域与 Wan2.6 边界。** 上述万相 2.7 文档将示例标为北京地域调用，并在其成功结果中展示该主机，故可确认它适用于官方的北京调用样例。阿里云[OSS 域名说明](https://help.aliyun.com/zh/oss/user-guide/access-oss-via-bucket-domain-name)把 `<bucket-name>.oss-accelerate.aliyuncs.com` 定义为传输加速 Bucket 域名；[传输加速说明](https://help.aliyun.com/zh/oss/user-guide/transfer-acceleration)说明请求会路由到目标 Bucket 所在地域。该后缀本身不证明 Bucket 的物理地域，也不证明仅限北京。阿里云[Wan2.6 文生图 V2 API 参考](https://help.aliyun.com/zh/model-studio/text-to-image-v2-api-reference)给出的北京 `wan2.6-t2i` 异步成功结果位于 `output.choices[].message.content[].image`，其示例主机为 `dashscope-result-bj.oss-cn-beijing.aliyuncs.com`；[Wan2.6 图像 API 参考](https://help.aliyun.com/zh/model-studio/wan-image-generation-api-reference)同样展示该主机，两页均未列出 `dashscope-a717.oss-accelerate.aliyuncs.com`。[Z-Image 图像 API 参考](https://help.aliyun.com/zh/model-studio/z-image-api-reference)将 `dashscope-a717` 列为可能变化的图像结果 Bucket，并给出加速域名格式，但它适用于另一模型，且明确不提供固定 OSS 白名单、建议向客户经理索取最新列表。原有 Wan2.6 失败记录的摘要与本候选吻合；仍缺少原响应的无签名主机证据或阿里云对北京 `wan2.6-t2i` PNG 结果的明确确认。白名单维持不变，真实 E2E 仍未成功。
+
+**待发送的厂商支持问询（尚未提交）：**“我们在华北 2（北京）调用 Model Studio `wan2.6-t2i` 异步文生图，成功任务返回的结果 URL 主机经小写规范化后，SHA-256 前 12 位为 `0bd1575e39cb`。公开文档中的候选精确主机 `dashscope-a717.oss-accelerate.aliyuncs.com` 具有相同摘要，但示例属于 Wan2.7 视频。请确认该候选是否也是北京地域 `wan2.6-t2i` PNG 结果的官方支持域名、其存储 Bucket 的地域；若不是，请提供该摘要对应的精确主机，或告知通过历史任务 ID 私下核查的渠道。若存储主机会变化，请提供当前可核验的精确主机清单或正式获取渠道。”问询只含公开主机、摘要、地域和模型，不附 API Key、账号资料、完整或签名 URL。阿里云[百炼平台售后服务范围说明](https://help.aliyun.com/zh/model-studio/after-sales-service-scope)将模型服务技术问题和 API 故障诊断纳入官网/在线/标准工单支持；此处仅准备文本，未提交工单。
