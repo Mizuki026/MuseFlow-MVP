@@ -1,7 +1,7 @@
 # MuseFlow MVP 技术方案
 
 - 版本：v0.2
-- 状态：范围与架构已确认，待实施
+- 状态：MVP 发布验收完成
 - 更新日期：2026-09-18
 - 对应产品文档：[MuseFlow MVP 产品设计文档](../product/museflow-mvp-product-design.md)
 
@@ -793,9 +793,9 @@ MuseFlow/
 - 第 4 个实现窗口已完成正式 React 前端：创建、详情、历史、非终态轮询、cursor 分页、状态筛选、事件时间线、错误展示、手动重试和稳定结果下载入口；
 - 前端状态与错误契约由 FastAPI OpenAPI 生成，服务端状态由 TanStack Query 管理，创建与重试使用稳定的业务提交幂等键；
 - 已补齐仅在 Demo 模式注册的场景任务入口、内部 execution profile、受信本地 CORS 和历史缩略图契约，并通过真实 Compose MockProvider Playwright 流程验证成功、临时恢复、永久失败、手动重试、分页、筛选、下载和刷新恢复；
-- 当前迁移已升级到 `0004_demo_execution_profiles`；本窗口验证结果为后端 `33 passed, 1 skipped`、前端 Vitest `17 passed`、Playwright `4 passed`，前端 build/typecheck/lint、Ruff、Pyright、Alembic check、Compose config 和 diff check 均通过。
+- 当前迁移已升级到 0004_demo_execution_profiles；第 6 窗口最终验收后后端 67 passed, 0 skipped，前端 Vitest 17 passed、Playwright 4 passed，前端 build/typecheck/lint、Ruff、Pyright、compileall、Alembic check、Compose config 和 diff check 均通过。
 
-第 5 个窗口已完成真实 Provider Adapter、官方结果字段核对、精确结果主机验证、非付费验证和一次获授权的真实端到端冒烟。该请求已完成安全下载、图片校验、checksum、私有 MinIO 写入和签名下载；详情见 Provider 可行性记录第 17 节。缺少结果 URL 或未知主机仍 fail-closed；默认 Worker 仍用 MockProvider。第 6 个窗口的真实 Provider 前置条件现已满足，但本窗口不开始第 6 个窗口。当前版本仍不承诺公网部署或外部 Provider exactly-once。
+第 5 个窗口已完成一次受控真实 Provider E2E；第 6 窗口完成了默认 MockProvider 正式演示、可靠性边界、Compose 健康检查和交付文档验收。当前版本仍不承诺公网部署或外部 Provider exactly-once。
 
 ## 24. 参考资料
 
@@ -809,4 +809,4 @@ MuseFlow/
 
 第 5 个窗口结果主机故障（历史记录）：此前一次真实请求已完成提交、轮询到 `SUCCEEDED` 并解析结果 URL，但在精确主机白名单处以 `RESULT_INVALID: result host is not allowed` 停止，未下载 PNG、未写入 MinIO。随后通过厂商支持确认精确主机与 Bucket 地域，并只补入该主机；Mock Provider 继续作为默认实现。
 
-最终状态：2026-09-19 在新的单次授权下，真实链路从提交至签名下载完整成功；第 6 个窗口前置条件已满足，尚未开始第 6 个窗口。
+最终状态：2026-09-19，MuseFlow MVP 发布验收完成；真实 Provider 仅有一次受控成功证据，默认演示仍使用 MockProvider，所有公网认证、限流、用户隔离、费用保护和外部 exactly-once 能力仍明确不在 MVP 范围。

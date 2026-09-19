@@ -6,47 +6,63 @@ MuseFlow 是面向开发者和面试评审者的可靠性作品集项目。MVP �
 
 当前后端工具链使用 Python 3.13、uv、FastAPI、SQLAlchemy、Alembic 和 PostgreSQL。依赖锁文件位于 `backend/uv.lock`。
 
-### Compose PostgreSQL 测试环境
+### 本地演示：Compose + 正式前端
 
-Compose PostgreSQL 通过宿主机 `127.0.0.1:55432` 暴露；数据库名、用户名和密码必须以当前 `compose.yaml` 的 PostgreSQL 服务配置为准。不要继续使用旧的临时实例连接串，也不要把实际凭据写入文档、脚本或日志。
+Docker Desktop、Docker Compose、Node.js 24.18.0/npm 和 uv 是本地演示的前置条件。Compose 所有端口只绑定到 `127.0.0.1`；MuseFlow MVP 没有认证、限流、用户隔离或公网滥用防护，**不得直接暴露到公网**。
 
-宿主机运行测试时，将 `MUSEFLOW_TEST_DATABASE_URL` 设置为当前 Compose PostgreSQL 的宿主连接串（主机为 `127.0.0.1`、端口为 `55432`），并同步设置 `MUSEFLOW_DATABASE_URL`。Compose 内部服务则使用服务名 `postgres` 和容器端口 `5432`，不要把内部地址用于宿主机测试。
-
-然后运行迁移、测试和 API：
+首次运行或代码更新后，在仓库根目录执行：
 
 ```powershell
-Push-Location backend
-uv run alembic upgrade head
-uv run pytest
-uv run uvicorn museflow.api.main:app --host 127.0.0.1 --port 8000
+docker compose up -d --build
+docker compose ps --all
+Invoke-WebRequest http://127.0.0.1:8000/api/v1/health/live
+Invoke-WebRequest http://127.0.0.1:8000/api/v1/health/ready
+```
+
+`migrate` 和 `minio-init` 是成功后退出的一次性 job；`api`、`postgres`、`redis`、`scheduler`、`worker` 和 `minio` 应显示为运行且健康。API readiness 只检查数据库和迁移版本，Scheduler/Worker 的容器 healthcheck 还会检查各自依赖；MinIO 可用性由 `minio/health/ready` 和 Worker healthcheck 覆盖。
+
+然后启动正式前端：
+
+```powershell
+Push-Location frontend
+npm ci
+npm run dev -- --host 127.0.0.1
 Pop-Location
 ```
 
-`MUSEFLOW_DATABASE_URL` 应在使用正式本机数据库时替换为实际连接串；不要把密码写入仓库、日志或对话。当前代码直接读取进程环境变量，不会自动加载 `.env` 文件。
+打开 `http://127.0.0.1:5173/tasks/new`，可用 Demo-only MockProvider 复现成功、临时失败、限流、超时和永久失败场景。正式页面只使用稳定的 MuseFlow 下载路径，不会把 MinIO 签名 URL 写入前端状态。
 
-### Compose
+本地端点：
 
-Docker Desktop + Compose is the local infrastructure path. Redis and MinIO are now part of compose.yaml and bind only to 127.0.0.1.
+- API：`http://127.0.0.1:8000/api/v1`
+- Redis：`redis://127.0.0.1:6379/0`
+- MinIO API：`http://127.0.0.1:9000`
+- MinIO Console：`http://127.0.0.1:9001`
+- 私有 bucket：`museflow-results`
 
-Run:
+Compose init job 会创建 bucket 并显式保持私有。默认凭据只适用于本机或受信网络的开发环境，不能复用于任何公网或共享环境。
 
-    docker compose up -d redis minio minio-init
-    docker compose ps
+### 停止、重置和排障
 
-The local endpoints are:
+```powershell
+# 停止容器，保留数据库、Redis 和 MinIO 数据卷
+docker compose stop
 
-- Redis: redis://127.0.0.1:6379/0
-- MinIO API: http://127.0.0.1:9000
-- MinIO Console: http://127.0.0.1:9001
-- Private bucket: museflow-results
+# 删除容器和网络，保留数据卷；下次 up 会继续使用现有数据
+docker compose down
 
-The Compose init job creates the bucket and explicitly keeps it private. Local default credentials are only for this trusted development environment; never reuse them outside it.
+# 开发环境完全重置（会删除本 Compose 项目的全部数据卷）
+docker compose down -v
+docker compose up -d --build
+```
+
+排障时先执行 `docker compose ps --all`、`docker compose logs --tail=100 api scheduler worker minio`。迁移失败看 `docker compose logs migrate`，MinIO bucket 初始化失败看 `docker compose logs minio-init`；确认依赖恢复后可用 `docker compose up -d --force-recreate <service>` 重启单个服务。宿主机测试数据库必须使用当前 Compose 的 PostgreSQL 用户、密码、数据库名和 `127.0.0.1:55432` 端口，并通过 `MUSEFLOW_TEST_DATABASE_URL` 传入；不要使用旧临时实例连接串。
 
 ### 当前环境审核与窗口边界
 
 Docker Desktop、Docker Engine 和 Docker Compose 已可用；Redis 与 MinIO 已通过 Compose 启动并完成健康检查。第 1 窗口的业务代码保持 PostgreSQL、任务领域和 HTTP API 边界不变，不因为这些依赖已就绪而提前引入 Scheduler、Celery、Worker、Provider 或对象存储逻辑。
 
-`127.0.0.1:55432` 的隔离 PostgreSQL 只作为第 1 窗口集成测试的可复现测试数据库保留，不是 Redis 或 MinIO 的替代方案，也不与 Compose 依赖冲突。第 2 窗口可以直接使用 Compose 内部地址 `redis://redis:6379/0`；后续结果持久化窗口可以直接使用 `http://minio:9000` 和私有 bucket `museflow-results`。Provider 仍需显式配置和受控验证，不存在自动替代承诺。
+`127.0.0.1:55432` 的隔离 PostgreSQL 现在也是宿主机集成测试的可复现入口，不是 Redis 或 MinIO 的替代方案，也不与 Compose 依赖冲突。Compose 内部服务使用 `postgres`、`redis` 和 `minio` 服务名；宿主机测试使用 `127.0.0.1` 和映射端口。Provider 仍需显式配置和受控验证，不存在自动替代承诺。
 ## 前端环境
 
 前端使用 React、TypeScript、Vite、React Router、TanStack Query 和 React Hook Form；测试工具已安装 Vitest、Testing Library 和 Playwright。
