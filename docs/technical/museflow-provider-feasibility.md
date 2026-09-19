@@ -338,3 +338,14 @@
 **阶段 0 已通过，第 1 个实现窗口可以开始。**
 
 已满足：官方候选调查、地区与费用核实、单图固定尺寸、异步提交、任务轮询、结果下载和媒体尺寸验证。三候选均不提供可依赖的外部幂等/稳定查询标识，因此产品外部重复调用降级承诺必须保留。429、5xx、超时和内容安全拒绝未被主动制造，正式适配器实现时应按本文官方契约和错误分类建立受控模拟测试。
+
+
+## 11. 正式 Adapter 实现状态
+
+**正式 Adapter 已实现**：`backend/src/museflow/providers.py` 提供 DashScope `wan2.6-t2i` 异步创建、任务轮询、状态归一化和安全结果下载；Worker 通过现有 `GenerationProvider` 接口选择 MockProvider 或显式配置的 DashScopeProvider。Adapter 不写 PostgreSQL、不修改任务状态、不调用 MinIO SDK，也不实现业务重试。
+
+实现固定北京地域实测契约：`n=1`、`size=1280*1280`、`prompt_extend=false`。收到远端 `task_id` 后由执行层写入当前 attempt，轮询使用单调截止时间；429、5xx、网络错误和轮询超时交给应用层重试，Provider 创建请求不自动重发。已受理但响应丢失的外部调用仍可能重复计费，MuseFlow 只保留一个权威本地结果，不宣称 Provider exactly-once。
+
+结果下载已集中在安全下载器：固定主机白名单、HTTPS、DNS 解析后的私网/环回/链路本地拒绝、重定向逐跳校验、连接/读取超时、流式 20 MiB 上限、Content-Type、PNG/JPEG/WEBP 文件头和 `1280×1280` 尺寸校验。验证后的字节继续通过现有确定性对象键和私有 MinIO ResultAssetStore 持久化。
+
+日常 Mock/契约/集成测试不访问真实 Provider，也不产生费用。真实冒烟测试必须由操作者显式运行并重新授权一次最多约 ¥0.20 的单次请求；环境变量存在本身不会触发请求。

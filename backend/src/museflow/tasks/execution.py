@@ -28,6 +28,7 @@ class ExecutionClaim:
     sequence: int
     execution_token: UUID
     provider_request_key: str
+    remote_request_id: str | None
     request: GenerationRequest
 
 
@@ -69,7 +70,10 @@ class ExecuteGenerationAttempt:
             result = self._provider.generate(
                 claim.request,
                 request_key=claim.provider_request_key,
-                remote_request_id=None,
+                remote_request_id=claim.remote_request_id,
+                on_remote_request_id=lambda remote_id: self._record_provider_request_id(
+                    claim, remote_id
+                ),
             )
         except Exception as error:
             self._fail(claim, error)
@@ -138,6 +142,7 @@ class ExecuteGenerationAttempt:
                     phase="PROVIDER_RUNNING",
                     provider_name=getattr(self._provider, "name", "mock"),
                     provider_request_key=f"{task_id}:attempt:{sequence}",
+                    provider_request_id=latest.provider_request_id if latest is not None else None,
                     execution_token=self._token_factory(),
                     lease_expires_at=now + timedelta(seconds=self._lease_seconds),
                     started_at=now,
@@ -175,8 +180,23 @@ class ExecuteGenerationAttempt:
                 sequence=sequence,
                 execution_token=attempt.execution_token,
                 provider_request_key=attempt.provider_request_key,
-                request=GenerationRequest(prompt=task.prompt, size_preset=task.size_preset),
+                remote_request_id=attempt.provider_request_id,
+                request=GenerationRequest(
+                    prompt=task.prompt,
+                    size_preset=task.size_preset,
+                    deadline_at=task.deadline_at,
+                ),
             )
+
+    def _record_provider_request_id(self, claim: ExecutionClaim, provider_request_id: str) -> None:
+        with self._session_factory.begin() as session:
+            attempt = session.get(GenerationAttemptModel, claim.attempt_id, with_for_update=True)
+            if (
+                attempt is not None
+                and attempt.execution_token == claim.execution_token
+                and attempt.status == "RUNNING"
+            ):
+                attempt.provider_request_id = provider_request_id
 
     def _succeed(
         self, claim: ExecutionClaim, result: GenerationResult, stored: StoredAsset | None
@@ -195,9 +215,13 @@ class ExecuteGenerationAttempt:
                 or not self._claim_is_current(attempt, task, claim, now)
             ):
                 return False
-            if stored is not None and session.scalar(
-                select(ResultAssetModel).where(ResultAssetModel.attempt_id == claim.attempt_id)
-            ) is None:
+            if (
+                stored is not None
+                and session.scalar(
+                    select(ResultAssetModel).where(ResultAssetModel.attempt_id == claim.attempt_id)
+                )
+                is None
+            ):
                 session.add(
                     ResultAssetModel(
                         id=uuid4(),
@@ -271,8 +295,10 @@ class ExecuteGenerationAttempt:
                 task.error_message = str(error)
                 event_type = "TASK_RETRY_WAIT"
             else:
-                terminal_code = "DEADLINE_EXCEEDED" if now >= task.deadline_at else (
-                    "RETRY_EXHAUSTED" if retryable else code
+                terminal_code = (
+                    "DEADLINE_EXCEEDED"
+                    if now >= task.deadline_at
+                    else ("RETRY_EXHAUSTED" if retryable else code)
                 )
                 task.status = TaskStatus.FAILED.value
                 task.error_code = terminal_code

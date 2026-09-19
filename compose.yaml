@@ -111,6 +111,9 @@ services:
       MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
       MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
       MINIO_BUCKET: ${MINIO_BUCKET:-museflow-results}
+      MUSEFLOW_PROVIDER: ${MUSEFLOW_PROVIDER:-mock}
+      DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
+      DASHSCOPE_API_HOST: ${DASHSCOPE_API_HOST:-}
     depends_on:
       migrate:
         condition: service_completed_successfully

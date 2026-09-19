@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from museflow.assets import MinioResultAssetStore
 from museflow.db.models import GenerationTaskModel
 from museflow.db.session import create_session_factory
-from museflow.providers import MockProvider
+from museflow.providers import MockProvider, create_provider_from_environment
 from museflow.queue import create_celery_app
 from museflow.runtime import worker_runtime_probe
 from museflow.tasks.execution import ExecuteGenerationAttempt
@@ -31,12 +31,16 @@ def execute_task(task_id: str) -> None:
     factory = _session_factory()
     with factory() as session:
         task = session.get(GenerationTaskModel, UUID(task_id))
-        scenario = (
-            task.execution_profile if task is not None and task.execution_profile else "success"
+        scenario = task.execution_profile if task is not None else None
+    provider = MockProvider(scenario=scenario) if scenario else create_provider_from_environment()
+    try:
+        ExecuteGenerationAttempt(factory, provider, asset_store=MinioResultAssetStore()).execute(
+            UUID(task_id)
         )
-    ExecuteGenerationAttempt(
-        factory, MockProvider(scenario=scenario), asset_store=MinioResultAssetStore()
-    ).execute(UUID(task_id))
+    finally:
+        close = getattr(provider, "close", None)
+        if callable(close):
+            close()
 
 
 if __name__ == "__main__" and "--check-ready" in sys.argv:

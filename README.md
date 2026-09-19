@@ -74,3 +74,14 @@ frontend/.env 已配置本机 API 地址 http://127.0.0.1:8000/api/v1，并由 G
 - 结果持久化窗口可直接使用已启动的私有 MinIO bucket，并读取 MINIO_ENDPOINT、访问凭据和 MINIO_BUCKET。
 - Provider 冒烟测试前：在本地配置 `DASHSCOPE_API_KEY` 和 `DASHSCOPE_API_HOST`，不得提交真实值。
 - 前端工作区已建立于 frontend/，Node 版本固定为 24.18.0，使用 npm。
+
+
+## 真实 Provider 与受控冒烟测试
+
+正式 Adapter 位于 backend/src/museflow/providers.py，通过 GenerationProvider 接口由 Worker 调用。默认 MUSEFLOW_PROVIDER=mock，普通测试和 Demo 不访问真实 Provider；需要本地受控运行时才设置 MUSEFLOW_PROVIDER=dashscope。
+
+DashScope 只从本地进程环境读取 DASHSCOPE_API_KEY 和 DASHSCOPE_API_HOST，不要写入源码、日志、文档或提交。Adapter 固定使用 wan2.6-t2i、n=1、size=1280*1280 和 prompt_extend=false，只执行一次创建请求；429、5xx、网络超时和轮询超时交给现有应用重试语义，不能在 Adapter 内部重发创建请求。
+
+远端任务 ID 由执行层关联到 attempt。结果 URL 经过主机白名单、重定向逐跳校验、网络地址拒绝、流式大小限制、Content-Type、文件头和尺寸校验后才写入私有 MinIO。Provider 不提供 exactly-once；远端已受理但响应丢失时仍可能发生重复调用和费用。
+
+受控冒烟测试不会因为环境变量存在而自动运行。先运行 uv run --directory backend python -m museflow.dashscope_smoke，该命令只检查变量存在并明确不发请求。只有再次确认北京地域/工作空间、模型权限、计费权限、单次最多约 ¥0.20、不得自动重试和遇错立即停止后，才显式追加 --authorize-real-request。日常 pytest、Compose Demo 和 CI 继续只使用 MockProvider。
