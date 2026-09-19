@@ -313,6 +313,53 @@ def test_wan26_async_choice_image_url_is_downloaded() -> None:
     assert len(result.metadata["result_host_digest"]) == 12
 
 
+def test_wan26_verified_accelerated_result_host_downloads_with_default_allowlist() -> None:
+    calls: list[httpx.Request] = []
+    result_host = "dashscope-a717.oss-accelerate.aliyuncs.com"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        if request.method == "POST":
+            return httpx.Response(200, json={"output": {"task_id": "task-1"}})
+        if request.url.host == result_host:
+            return httpx.Response(200, headers={"content-type": "image/png"}, content=_png())
+        return httpx.Response(
+            200,
+            json={
+                "output": {
+                    "task_status": "SUCCEEDED",
+                    "choices": [
+                        {
+                            "message": {
+                                "content": [
+                                    {
+                                        "type": "image",
+                                        "image": f"https://{result_host}/synthetic-result.png",
+                                    }
+                                ]
+                            }
+                        }
+                    ],
+                }
+            },
+        )
+
+    provider, client = _provider(handler)
+    try:
+        result = provider.generate(
+            GenerationRequest("prompt", DASHSCOPE_SIZE),
+            request_key="key",
+            remote_request_id=None,
+        )
+    finally:
+        client.close()
+
+    assert result.content == _png()
+    assert result.metadata["result_host_allowlisted"] == "yes"
+    assert result.metadata["result_host_digest"] == "0bd1575e39cb"
+    assert sum(request.method == "POST" for request in calls) == 1
+
+
 def test_network_timeout_is_transient() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         raise httpx.ReadTimeout("provider timeout", request=request)

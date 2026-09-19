@@ -1,6 +1,6 @@
 # MuseFlow MVP 图片生成 Provider 可行性记录
 
-> 当前判定（2026-09-19）：第 1、12、13 节保留各阶段的历史快照；最新核查见第 15 节。真实 Provider E2E 尚未完成，不满足第 6 窗口前置条件。
+> 当前判定（2026-09-19）：前述阶段结论保留为历史快照；最新工单证据与修复见第 16 节。真实 Provider E2E 尚未完成，不满足第 6 窗口前置条件。
 
 ## 1. 调查范围与结论状态
 
@@ -403,3 +403,13 @@
 **地域与 Wan2.6 边界。** 上述万相 2.7 文档将示例标为北京地域调用，并在其成功结果中展示该主机，故可确认它适用于官方的北京调用样例。阿里云[OSS 域名说明](https://help.aliyun.com/zh/oss/user-guide/access-oss-via-bucket-domain-name)把 `<bucket-name>.oss-accelerate.aliyuncs.com` 定义为传输加速 Bucket 域名；[传输加速说明](https://help.aliyun.com/zh/oss/user-guide/transfer-acceleration)说明请求会路由到目标 Bucket 所在地域。该后缀本身不证明 Bucket 的物理地域，也不证明仅限北京。阿里云[Wan2.6 文生图 V2 API 参考](https://help.aliyun.com/zh/model-studio/text-to-image-v2-api-reference)给出的北京 `wan2.6-t2i` 异步成功结果位于 `output.choices[].message.content[].image`，其示例主机为 `dashscope-result-bj.oss-cn-beijing.aliyuncs.com`；[Wan2.6 图像 API 参考](https://help.aliyun.com/zh/model-studio/wan-image-generation-api-reference)同样展示该主机，两页均未列出 `dashscope-a717.oss-accelerate.aliyuncs.com`。[Z-Image 图像 API 参考](https://help.aliyun.com/zh/model-studio/z-image-api-reference)将 `dashscope-a717` 列为可能变化的图像结果 Bucket，并给出加速域名格式，但它适用于另一模型，且明确不提供固定 OSS 白名单、建议向客户经理索取最新列表。原有 Wan2.6 失败记录的摘要与本候选吻合；仍缺少原响应的无签名主机证据或阿里云对北京 `wan2.6-t2i` PNG 结果的明确确认。白名单维持不变，真实 E2E 仍未成功。
 
 **待发送的厂商支持问询（尚未提交）：**“我们在华北 2（北京）调用 Model Studio `wan2.6-t2i` 异步文生图，成功任务返回的结果 URL 主机经小写规范化后，SHA-256 前 12 位为 `0bd1575e39cb`。公开文档中的候选精确主机 `dashscope-a717.oss-accelerate.aliyuncs.com` 具有相同摘要，但示例属于 Wan2.7 视频。请确认该候选是否也是北京地域 `wan2.6-t2i` PNG 结果的官方支持域名、其存储 Bucket 的地域；若不是，请提供该摘要对应的精确主机，或告知通过历史任务 ID 私下核查的渠道。若存储主机会变化，请提供当前可核验的精确主机清单或正式获取渠道。”问询只含公开主机、摘要、地域和模型，不附 API Key、账号资料、完整或签名 URL。阿里云[百炼平台售后服务范围说明](https://help.aliyun.com/zh/model-studio/after-sales-service-scope)将模型服务技术问题和 API 故障诊断纳入官网/在线/标准工单支持；此处仅准备文本，未提交工单。
+
+## 16. 第 5 个窗口：工单核对与精确主机修复（2026-09-19）
+
+用户提供的阿里云售后工程师答复，按北京地域 `wan2.6-t2i` 审计记录中的请求标识核对到与受控 smoke 相同提示词的成功图片结果；该 PNG 结果 URL 的精确主机为 `dashscope-a717.oss-accelerate.aliyuncs.com`。按下载器算法计算，其摘要为 `0bd1575e39cb`，与此前失败诊断一致。这是针对该具体模型调用的厂商响应证据，不再仅是第 15 节基于摘要和其他模型文档提出的候选。工单原文含完整签名 URL；本仓库只记录裸主机和摘要，不保存路径、查询参数、请求标识、账号信息或原始响应，也未访问该链接。
+
+这一证据足以将上述**单个精确主机**加入 `DEFAULT_RESULT_HOSTS`，同时保留北京公开样例主机。未知主机、伪造后缀和跳转目标仍被拒绝；DNS 私网/环回/异常、响应大小、Content-Type、文件头、尺寸与 SHA-256 校验均保持不变。加速域名不编码 Bucket 物理地域；工程师尚未确认该 Bucket 的实际存储地域或未来结果主机是否会变化，因此不允许 OSS 后缀通配，也不宣称该主机是长期完整清单。若后续返回其他主机，继续 fail-closed 并逐个取证。
+
+回归测试先在 `DashScopeProvider.generate()` 的合成成功响应上复现 `RESULT_INVALID: result host is not allowed`，再以精确白名单修复通过；测试 fixture 不含真实签名 URL。聚焦 Provider/安全测试为 29 passed。非付费全量 pytest 为 67 passed、0 skipped；运行期间临时停用共享 Scheduler 以隔离固定过去时间的 lease/fencing 测试，结束后已恢复。首次使用旧临时数据库 URL 的运行失败；修正为当前 Compose 数据库配置后，Scheduler 并发运行时有一次既有 fencing 竞态失败，隔离运行全绿。仓库全量 Ruff、Pyright、compileall、Alembic check、Compose config 与改动文件格式检查通过。
+
+本轮没有发起真实 Provider 请求，也没有使用工单中的签名 URL。真实 Provider 仍未完成 PNG 安全下载、checksum、MinIO 写入和签名下载，故**不满足第 6 窗口前置条件**。下一次请求之前，必须先轮换此前截图暴露片段的 API Key，并取得新的单次明确授权；Worker 默认继续使用 MockProvider。

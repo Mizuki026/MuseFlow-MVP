@@ -85,6 +85,6 @@ DashScope 只从本地进程环境读取 DASHSCOPE_API_KEY 和 DASHSCOPE_API_HOS
 
 Wan2.6 新异步协议的成功结果字段为 `output.choices[].message.content[].image`；适配器同时兼容已记录的旧 `output.results[].url` 结构。缺少可解析结果 URL 时仍返回永久错误并停止，不把任务标记为成功。
 
-官方北京示例结果主机为 `dashscope-result-bj.oss-cn-beijing.aliyuncs.com`，当前安全下载器已使用该精确主机白名单，并继续逐跳校验重定向、DNS 解析网络、响应大小、媒体类型、文件头和尺寸。最近的受控请求已提交、轮询到 `SUCCEEDED` 并解析结果 URL，但结果主机摘要 `0bd1575e39cb` 未命中白名单。按官方图片输出域名表离线核对的 10 个精确主机均不匹配；实际主机仍缺少可信明文与官方归属证明，因此不扩大白名单。
+官方北京示例结果主机仍在精确白名单中。阿里云售后工程师按北京地域 `wan2.6-t2i` 的既有请求核对，确认成功图片结果使用 `dashscope-a717.oss-accelerate.aliyuncs.com`；该主机与先前保存的摘要 `0bd1575e39cb` 一致，因此只增加这一精确主机，不允许任意 OSS 域名或后缀。安全下载器继续逐跳校验重定向、DNS 网络地址、响应大小、媒体类型、文件头和尺寸；加速域名本身不证明 Bucket 的物理地域。
 
 真实 Provider 尚未完成 PNG 下载、校验、MinIO 写入和签名下载；默认 MockProvider 的完整链路独立通过非付费验证。受控 smoke 已加入一次结果后续的私有 MinIO 写入、签名 200、匿名 403、过期 403 验收。下一次真实请求前，先轮换截图中暴露片段的 API Key，再单独确认计费和一次请求授权。

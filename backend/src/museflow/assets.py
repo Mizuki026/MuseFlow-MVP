@@ -17,7 +17,12 @@ import httpx
 from minio import Minio
 
 MAX_RESULT_BYTES = 20 * 1024 * 1024
-DEFAULT_RESULT_HOSTS = frozenset({"dashscope-result-bj.oss-cn-beijing.aliyuncs.com"})
+DEFAULT_RESULT_HOSTS = frozenset(
+    {
+        "dashscope-result-bj.oss-cn-beijing.aliyuncs.com",
+        "dashscope-a717.oss-accelerate.aliyuncs.com",
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
