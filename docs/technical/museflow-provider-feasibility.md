@@ -415,3 +415,11 @@
 回归测试先在 `DashScopeProvider.generate()` 的合成成功响应上复现 `RESULT_INVALID: result host is not allowed`，再以精确白名单修复通过；测试 fixture 不含真实签名 URL。聚焦 Provider/安全测试为 29 passed。非付费全量 pytest 为 67 passed、0 skipped；运行期间临时停用共享 Scheduler 以隔离固定过去时间的 lease/fencing 测试，结束后已恢复。首次使用旧临时数据库 URL 的运行失败；修正为当前 Compose 数据库配置后，Scheduler 并发运行时有一次既有 fencing 竞态失败，隔离运行全绿。仓库全量 Ruff、Pyright、compileall、Alembic check、Compose config 与改动文件格式检查通过。
 
 本轮没有发起真实 Provider 请求，也没有使用工单中的签名 URL。真实 Provider 仍未完成 PNG 安全下载、checksum、MinIO 写入和签名下载，故**不满足第 6 窗口前置条件**。此前截图暴露过 API Key 片段，建议轮换；若用户选择继续使用，仍需在下一次请求前明确确认计费并取得新的单次授权。Worker 默认继续使用 MockProvider。
+
+## 17. 第 5 个窗口：单次真实 Provider E2E 验收（2026-09-19）
+
+在新的明确授权下，对提交 `2636c4e57e8254347222338ec89fc013ab6b5b11` 执行**一次**受控冒烟：北京地域 `wan2.6-t2i`、`n=1`、`1280*1280`、`prompt_extend=false`。API Key 与 Host 仅核对存在性，Host 符合官方北京业务空间专属端点格式；Worker 保持 `MUSEFLOW_PROVIDER=mock`。Adapter 无创建请求自动重试；本次没有再次提交，也没有使用工单中的签名 URL。
+
+提交成功（单独的提交 HTTP 状态码未保留）；轮询 HTTP 状态为 `200,200,200,200,200`，任务状态轨迹为 `RUNNING → SUCCEEDED`。结果 URL 主机命中精确白名单，主机摘要 `0bd1575e39cb`；安全下载返回 HTTP 200，Content-Type 为 `image/png`，PNG 文件头及 `1280×1280` 尺寸校验通过，实际大小 `2,004,922` 字节，SHA-256 为 `c8bedca14b2f5e80f97a027612bd57424c403ffd284c9594ccc8079ab933aa67`。图片写入私有 MinIO；签名下载 HTTP 200 且下载字节 checksum 相同，匿名读取 403，过期签名 403。命令退出码 0，未记录完整结果 URL、签名 URL、原始厂商响应、API Key、完整 API Host、业务空间 ID 或账号信息。
+
+本次执行前非付费验证为 Provider/安全测试 `31 passed`、全量 pytest `67 passed, 0 skipped`（两条既有依赖弃用警告）、真实 Compose Mock→Redis→Worker→MinIO 测试 `3 passed`；仓库全量 Ruff、Pyright、compileall、Alembic check、Compose config 与 diff check 均通过。第 5 个窗口的真实 Provider E2E 前置条件已满足，可以在后续单独开始第 6 个窗口；这不等同于宣布整个 MVP 的全部发布验收条目已经完成。默认 MockProvider 与外部 exactly-once 降级承诺不变。

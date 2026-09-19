@@ -795,7 +795,7 @@ MuseFlow/
 - 已补齐仅在 Demo 模式注册的场景任务入口、内部 execution profile、受信本地 CORS 和历史缩略图契约，并通过真实 Compose MockProvider Playwright 流程验证成功、临时恢复、永久失败、手动重试、分页、筛选、下载和刷新恢复；
 - 当前迁移已升级到 `0004_demo_execution_profiles`；本窗口验证结果为后端 `33 passed, 1 skipped`、前端 Vitest `17 passed`、Playwright `4 passed`，前端 build/typecheck/lint、Ruff、Pyright、Alembic check、Compose config 和 diff check 均通过。
 
-第 5 个窗口已完成真实 Provider Adapter、官方结果字段核对和非付费验证；适配器现兼容 Wan2.6 新异步协议与旧结果结构，缺少结果 URL 仍 fail-closed。此前唯一真实请求因 `PROVIDER_RESULT_URL_MISSING` 未完成下载，本窗口未再次请求；修复后的真实链路仍需一次新的、单独授权的冒烟验证。当前版本仍不承诺公网部署或外部 Provider exactly-once。
+第 5 个窗口已完成真实 Provider Adapter、官方结果字段核对、精确结果主机验证、非付费验证和一次获授权的真实端到端冒烟。该请求已完成安全下载、图片校验、checksum、私有 MinIO 写入和签名下载；详情见 Provider 可行性记录第 17 节。缺少结果 URL 或未知主机仍 fail-closed；默认 Worker 仍用 MockProvider。第 6 个窗口的真实 Provider 前置条件现已满足，但本窗口不开始第 6 个窗口。当前版本仍不承诺公网部署或外部 Provider exactly-once。
 
 ## 24. 参考资料
 
@@ -807,6 +807,6 @@ MuseFlow/
 - [React with TypeScript](https://react.dev/learn/typescript)
 - [TanStack Query Documentation](https://tanstack.com/query/latest)
 
-第 5 个窗口最新结果主机复核：唯一一次真实请求已完成提交、轮询到 `SUCCEEDED` 并解析结果 URL，但在安全下载器的精确主机白名单检查处以 `RESULT_INVALID: result host is not allowed` 停止，未下载 PNG、未写入 MinIO。官方北京示例主机已在白名单中，而实际响应主机未被安全保留或确认，因此不扩大白名单、不宣称真实 Provider E2E 成功；Mock Provider 继续作为默认实现。
+第 5 个窗口结果主机故障（历史记录）：此前一次真实请求已完成提交、轮询到 `SUCCEEDED` 并解析结果 URL，但在精确主机白名单处以 `RESULT_INVALID: result host is not allowed` 停止，未下载 PNG、未写入 MinIO。随后通过厂商支持确认精确主机与 Bucket 地域，并只补入该主机；Mock Provider 继续作为默认实现。
 
-本轮没有再次发起真实 Provider 请求，真实链路仍不满足第 6 个窗口前置条件。
+最终状态：2026-09-19 在新的单次授权下，真实链路从提交至签名下载完整成功；第 6 个窗口前置条件已满足，尚未开始第 6 个窗口。
