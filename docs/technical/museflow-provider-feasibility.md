@@ -1,5 +1,7 @@
 # MuseFlow MVP 图片生成 Provider 可行性记录
 
+> 当前判定（2026-09-19）：第 1、12、13 节保留各阶段的历史快照；最新核查见第 14 节。真实 Provider E2E 尚未完成，不满足第 6 窗口前置条件。
+
 ## 1. 调查范围与结论状态
 
 - **查证日期**：2026-09-18
@@ -369,3 +371,27 @@
 
 本轮没有再次发起真实 Provider 请求。适配器现在可在下一次受控请求前输出不含主机明文的精确白名单命中结果和主机摘要；这不会扩大白名单，也不会绕过 SSRF 或重定向校验。只有在获得脱敏的真实主机证据或新的明确授权并确认配置后，才可重新进行一次受控真实冒烟；在此之前，真实 Provider 不纳入 MVP 成功承诺，Mock Provider 仍是默认实现。
 - **第 5 个窗口最新状态**：唯一一次真实请求已提交并轮询到 `SUCCEEDED`，但结果 URL 在安全下载器的精确主机白名单处被拒绝；未下载 PNG、未写入 MinIO，真实 Provider E2E 仍未成功。
+
+
+## 14. 结果主机摘要离线核对（2026-09-19）
+
+本轮仅核对已有脱敏摘要、Git 历史和阿里云官方精确域名，没有发起真实 Provider 请求。运行环境的 API Key 存在，API Host 形态属于北京请求端点；这两个布尔结论不能证明结果 URL 的主机。旧探针记录曾以相同摘要记载 PNG 下载 HTTP 200、1280×1280 和 1,828,507 字节，但没有保留明文主机或可复核的脱敏 fixture；该记录不能作为扩大生产下载白名单的依据。
+
+按 `SecureResultDownloader.diagnose_url` 的算法，对 URL 主机小写后取 SHA-256 前 12 个十六进制字符。目标摘要为 `0bd1575e39cb`。[阿里云万相图片输出存储域名表](https://help.aliyun.com/zh/model-studio/text-to-image-api-reference)列出以下精确主机：
+
+| 地域 | 精确结果主机 | 摘要 | 匹配 |
+| --- | --- | --- | --- |
+| 北京 | `dashscope-result-bj.oss-cn-beijing.aliyuncs.com` | `b5afac5a68d1` | 否 |
+| 杭州 | `dashscope-result-hz.oss-cn-hangzhou.aliyuncs.com` | `e09fd63c7ae2` | 否 |
+| 上海 | `dashscope-result-sh.oss-cn-shanghai.aliyuncs.com` | `a16310289cc1` | 否 |
+| 乌兰察布 | `dashscope-result-wlcb.oss-cn-wulanchabu.aliyuncs.com` | `a941e736157c` | 否 |
+| 张家口 | `dashscope-result-zjk.oss-cn-zhangjiakou.aliyuncs.com` | `c7032766eeb1` | 否 |
+| 深圳 | `dashscope-result-sz.oss-cn-shenzhen.aliyuncs.com` | `3cea30557767` | 否 |
+| 河源 | `dashscope-result-hy.oss-cn-heyuan.aliyuncs.com` | `dd6c2dc29087` | 否 |
+| 成都 | `dashscope-result-cd.oss-cn-chengdu.aliyuncs.com` | `f848c86cb854` | 否 |
+| 广州 | `dashscope-result-gz.oss-cn-guangzhou.aliyuncs.com` | `6de737f78828` | 否 |
+| 乌兰察布 ACDR | `dashscope-result-wlcb-acdr-1.oss-cn-wulanchabu-acdr-1.aliyuncs.com` | `7e812c9e57d5` | 否 |
+
+合法尾随点形式也逐个离线比对，均不匹配。[Wan2.6 官方响应样例](https://help.aliyun.com/en/model-studio/wan-image-generation-api-reference)中的北京和上海精确结果主机均包含在上表，也不匹配。当前证据无法确定实际结果主机的明文、官方归属或适用地域；白名单维持不变，真实 Provider E2E 仍未完成。若要解锁，需要提供不含签名参数的可信主机证据及其官方归属证明，或由厂商确认该摘要对应的精确结果主机；不得为猜测再次生成图片。
+
+受控 smoke 现已具备单次 Provider 结果下载后的 MinIO 私有写入、签名下载 200、匿名 403 和过期 403 验收路径。下一次真实请求前必须先轮换已在截图中暴露片段的 API Key，并重新取得该次明确授权。
