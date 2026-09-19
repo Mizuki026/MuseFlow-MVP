@@ -324,3 +324,34 @@ def test_network_timeout_is_transient() -> None:
     finally:
         client.close()
     assert error.value.code == "PROVIDER_NETWORK_ERROR"
+
+
+@pytest.mark.parametrize(
+    ("resolved_addresses", "message"),
+    [
+        (["127.0.0.1"], "forbidden network"),
+        (["::1"], "forbidden network"),
+        (["10.0.0.8"], "forbidden network"),
+        (["fe80::8"], "forbidden network"),
+        (["not-an-ip"], "could not be resolved safely"),
+        ([], "forbidden network"),
+    ],
+)
+def test_download_rejects_private_loopback_and_invalid_resolution(
+    resolved_addresses: list[str], message: str
+) -> None:
+    client = httpx.Client(
+        transport=httpx.MockTransport(
+            lambda _: httpx.Response(200, headers={"content-type": "image/png"}, content=_png())
+        )
+    )
+    downloader = SecureResultDownloader(
+        client=client,
+        resolve_host=lambda _: resolved_addresses,
+        expected_dimensions=(1280, 1280),
+    )
+    try:
+        with pytest.raises(ValueError, match=message):
+            downloader.download("https://dashscope-result-bj.oss-cn-beijing.aliyuncs.com/result")
+    finally:
+        client.close()

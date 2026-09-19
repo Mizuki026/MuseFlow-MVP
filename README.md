@@ -90,4 +90,6 @@ DashScope 只从本地进程环境读取 DASHSCOPE_API_KEY 和 DASHSCOPE_API_HOS
 
 Wan2.6 新异步协议的成功结果字段为 `output.choices[].message.content[].image`；适配器同时兼容已记录的旧 `output.results[].url` 结构。缺少可解析结果 URL 时仍返回永久错误并停止，不把任务标记为成功。
 
-上一次唯一真实请求完成提交并进入轮询，但因 `PROVIDER_RESULT_URL_MISSING` 停止，未下载、未写入 MinIO、未重试。本窗口只使用官方样例和脱敏 fixture 验证解析修复，没有再次发起真实请求。适配器修复后的真实端到端链路仍需一次新的、单独授权的受控冒烟测试。
+官方北京示例结果主机为 `dashscope-result-bj.oss-cn-beijing.aliyuncs.com`，当前安全下载器已使用该精确主机白名单，并继续逐跳校验重定向、DNS 解析网络、响应大小、媒体类型、文件头和尺寸。本窗口唯一一次授权真实请求已完成提交、轮询到 `SUCCEEDED` 并解析出结果 URL，但在下载前因 `result host is not allowed` 被 fail-closed 拒绝；由于没有保留完整签名 URL 或原始响应，无法安全确认实际返回主机，因此不扩大白名单。
+
+本窗口没有再次发起真实 Provider 请求，也没有下载 PNG、写入 MinIO 或宣称真实 Provider E2E 成功。需要新的明确授权后，才能在修复或确认结果主机后执行下一次、且仅一次的受控冒烟测试。

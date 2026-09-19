@@ -806,3 +806,7 @@ MuseFlow/
 - [PostgreSQL Explicit Locking](https://www.postgresql.org/docs/current/explicit-locking.html)
 - [React with TypeScript](https://react.dev/learn/typescript)
 - [TanStack Query Documentation](https://tanstack.com/query/latest)
+
+第 5 个窗口最新结果主机复核：唯一一次真实请求已完成提交、轮询到 `SUCCEEDED` 并解析结果 URL，但在安全下载器的精确主机白名单检查处以 `RESULT_INVALID: result host is not allowed` 停止，未下载 PNG、未写入 MinIO。官方北京示例主机已在白名单中，而实际响应主机未被安全保留或确认，因此不扩大白名单、不宣称真实 Provider E2E 成功；Mock Provider 继续作为默认实现。
+
+本轮没有再次发起真实 Provider 请求，真实链路仍不满足第 6 个窗口前置条件。

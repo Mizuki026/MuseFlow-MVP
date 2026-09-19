@@ -360,3 +360,12 @@
 - 本窗口不降低“至少一次真实 Provider 端到端生成”的产品成功定义，也不把失败请求描述为成功。适配器修复后的真实链路仍需要一次新的、单独授权的冒烟请求；在获得授权前不得运行真实命令。
 
 本窗口的实现与验证不改变应用层 retry、lease、execution fencing、MinIO 私有 bucket 或 exactly-once 降级语义。
+
+## 13. 第 5 个窗口结果主机白名单复核（2026-09-19）
+
+官方 Wan2.6 文档的北京成功响应示例使用精确主机 `dashscope-result-bj.oss-cn-beijing.aliyuncs.com`；该主机已经存在于 `DEFAULT_RESULT_HOSTS`，并通过安全下载器的 HTTPS、精确主机、逐跳重定向和 DNS 网络安全检查。官方文档没有授权将任意 OSS 域名或后缀匹配视为安全。
+
+本次授权冒烟请求实际走到了结果 URL 下载入口，但在白名单检查处返回 `RESULT_INVALID: result host is not allowed`。工作区没有保留完整签名 URL、原始响应或可用于识别实际主机的脱敏值，因此无法证明实际返回主机是什么，也不能安全增加新的白名单成员。当前行为保持 fail-closed；该失败记录为“结果主机无法安全确认”，而不是 Provider 成功。
+
+本轮没有再次发起真实 Provider 请求。只有在获得脱敏的真实主机证据或新的明确授权并确认配置后，才可重新进行一次受控真实冒烟；在此之前，真实 Provider 不纳入 MVP 成功承诺，Mock Provider 仍是默认实现。
+- **第 5 个窗口最新状态**：唯一一次真实请求已提交并轮询到 `SUCCEEDED`，但结果 URL 在安全下载器的精确主机白名单处被拒绝；未下载 PNG、未写入 MinIO，真实 Provider E2E 仍未成功。
