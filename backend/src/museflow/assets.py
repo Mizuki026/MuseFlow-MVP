@@ -39,6 +39,18 @@ class DownloadedResult:
     status_code: int
 
 
+@dataclass(frozen=True, slots=True)
+class ResultHostDiagnostic:
+    allowlisted: bool
+    host_digest: str | None
+
+    @property
+    def summary(self) -> str:
+        state = "yes" if self.allowlisted else "no"
+        digest = self.host_digest or "unavailable"
+        return f"allowlisted={state}, host_digest={digest}"
+
+
 class ResultDownloadError(RuntimeError):
     def __init__(self, code: str, message: str, *, retryable: bool) -> None:
         super().__init__(message)
@@ -183,6 +195,20 @@ class SecureResultDownloader:
         if self._owns_client:
             self._client.close()
 
+    def diagnose_url(self, url: str) -> ResultHostDiagnostic:
+        try:
+            host = urlparse(url).hostname
+        except ValueError:
+            return ResultHostDiagnostic(False, None)
+        if not host:
+            return ResultHostDiagnostic(False, None)
+        normalized_host = host.lower()
+        digest = hashlib.sha256(normalized_host.encode("utf-8")).hexdigest()[:12]
+        return ResultHostDiagnostic(
+            normalized_host in self._allowed_hosts,
+            digest,
+        )
+
     def download(self, url: str) -> DownloadedResult:
         current_url = url
         for redirect_count in range(self._max_redirects + 1):
@@ -243,11 +269,15 @@ class SecureResultDownloader:
         raise ValueError("result redirect limit exceeded")
 
     def _validate_url(self, url: str) -> None:
-        parsed = urlparse(url)
+        try:
+            parsed = urlparse(url)
+        except ValueError as error:
+            raise ValueError("result URL is not allowed") from error
         if parsed.scheme != "https" or parsed.username or parsed.password or not parsed.hostname:
             raise ValueError("result URL is not allowed")
         host = parsed.hostname.lower()
-        if host not in self._allowed_hosts:
+        diagnostic = self.diagnose_url(url)
+        if not diagnostic.allowlisted:
             raise ValueError("result host is not allowed")
         _assert_safe_host(host, self._resolve_host)
 

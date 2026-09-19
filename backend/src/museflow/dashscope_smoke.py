@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import os
 
-from museflow.providers import DASHSCOPE_SIZE, DashScopeProvider, GenerationRequest
+from museflow.providers import DASHSCOPE_SIZE, DashScopeProvider, GenerationRequest, ProviderError
 
 
 def main() -> int:
@@ -49,6 +49,16 @@ def main() -> int:
             request_key="controlled-smoke",
             remote_request_id=None,
         )
+        print(
+            "Result host diagnostic:",
+            f"allowlisted={result.metadata.get('result_host_allowlisted', 'unknown')},",
+            f"host_digest={result.metadata.get('result_host_digest', 'unknown')}",
+        )
+    except ProviderError as error:
+        print("Provider error:", error.code)
+        if error.diagnostic:
+            print("Result host diagnostic:", error.diagnostic)
+        return 1
     finally:
         provider.close()
 

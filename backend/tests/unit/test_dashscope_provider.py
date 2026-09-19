@@ -85,6 +85,8 @@ def test_dashscope_success_submits_once_polls_and_downloads() -> None:
     assert result.provider_request_id == "task-1"
     assert result.metadata["task_status_sequence"] == "RUNNING->SUCCEEDED"
     assert result.metadata["width"] == "1280"
+    assert result.metadata["result_host_allowlisted"] == "yes"
+    assert len(result.metadata["result_host_digest"]) == 12
     assert result.result_digest == hashlib.sha256(_png()).hexdigest()
     assert sum(request.method == "POST" for request in calls) == 1
 
@@ -307,6 +309,8 @@ def test_wan26_async_choice_image_url_is_downloaded() -> None:
     assert result.provider_request_id == "task-1"
     assert result.metadata["task_status_sequence"] == "SUCCEEDED"
     assert result.metadata["width"] == "1280"
+    assert result.metadata["result_host_allowlisted"] == "yes"
+    assert len(result.metadata["result_host_digest"]) == 12
 
 
 def test_network_timeout_is_transient() -> None:
@@ -355,3 +359,68 @@ def test_download_rejects_private_loopback_and_invalid_resolution(
             downloader.download("https://dashscope-result-bj.oss-cn-beijing.aliyuncs.com/result")
     finally:
         client.close()
+
+
+def test_result_host_diagnostic_does_not_expose_host() -> None:
+    client = httpx.Client(
+        transport=httpx.MockTransport(
+            lambda _: httpx.Response(200, headers={"content-type": "image/png"}, content=_png())
+        )
+    )
+    downloader = SecureResultDownloader(
+        client=client,
+        resolve_host=lambda _: ["93.184.216.34"],
+        expected_dimensions=(1280, 1280),
+    )
+    try:
+        diagnostic = downloader.diagnose_url("https://untrusted.example/result")
+    finally:
+        client.close()
+
+    assert diagnostic.allowlisted is False
+    assert diagnostic.host_digest == hashlib.sha256(b"untrusted.example").hexdigest()[:12]
+    assert "untrusted.example" not in diagnostic.summary
+    assert "allowlisted=no" in diagnostic.summary
+
+
+def test_rejected_result_reports_safe_host_diagnostic() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            return httpx.Response(200, json={"output": {"task_id": "task-1"}})
+        return httpx.Response(
+            200,
+            json={
+                "output": {
+                    "task_status": "SUCCEEDED",
+                    "choices": [
+                        {
+                            "message": {
+                                "content": [
+                                    {
+                                        "image": "https://untrusted.example/result.png",
+                                        "type": "image",
+                                    }
+                                ]
+                            }
+                        }
+                    ],
+                }
+            },
+        )
+
+    provider, client = _provider(handler)
+    try:
+        with pytest.raises(PermanentProviderError) as error:
+            provider.generate(
+                GenerationRequest("prompt", DASHSCOPE_SIZE),
+                request_key="key",
+                remote_request_id=None,
+            )
+    finally:
+        client.close()
+
+    assert error.value.code == "RESULT_INVALID"
+    assert error.value.diagnostic == (
+        "allowlisted=no, host_digest=" + hashlib.sha256(b"untrusted.example").hexdigest()[:12]
+    )
+    assert "untrusted.example" not in str(error.value)

@@ -21,23 +21,39 @@ DASHSCOPE_SIZE = "1280*1280"
 
 
 class ProviderError(RuntimeError):
-    def __init__(self, code: str, message: str, *, retryable: bool) -> None:
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        retryable: bool,
+        diagnostic: str | None = None,
+    ) -> None:
         super().__init__(message)
         self.code, self.retryable = code, retryable
+        self.diagnostic = diagnostic
 
 
 class TransientProviderError(ProviderError):
     def __init__(
-        self, code: str = "PROVIDER_UNAVAILABLE", message: str = "provider unavailable"
+        self,
+        code: str = "PROVIDER_UNAVAILABLE",
+        message: str = "provider unavailable",
+        *,
+        diagnostic: str | None = None,
     ) -> None:
-        super().__init__(code, message, retryable=True)
+        super().__init__(code, message, retryable=True, diagnostic=diagnostic)
 
 
 class PermanentProviderError(ProviderError):
     def __init__(
-        self, code: str = "PROVIDER_REJECTED", message: str = "provider rejected request"
+        self,
+        code: str = "PROVIDER_REJECTED",
+        message: str = "provider rejected request",
+        *,
+        diagnostic: str | None = None,
     ) -> None:
-        super().__init__(code, message, retryable=False)
+        super().__init__(code, message, retryable=False, diagnostic=diagnostic)
 
 
 class ProviderConfigurationError(PermanentProviderError):
@@ -186,6 +202,7 @@ class DashScopeProvider:
         if remote_request_id is None and on_remote_request_id is not None:
             on_remote_request_id(task_id)
         result_url, statuses, poll_codes = self._poll(task_id, deadline)
+        host_diagnostic = self._downloader.diagnose_url(result_url)
         try:
             image = self._downloader.download(result_url)
         except ResultDownloadError as error:
@@ -194,7 +211,11 @@ class DashScopeProvider:
         except httpx.HTTPError as error:
             raise TransientProviderError("RESULT_DOWNLOAD_UNAVAILABLE") from error
         except ValueError as error:
-            raise PermanentProviderError("RESULT_INVALID", str(error)) from error
+            raise PermanentProviderError(
+                "RESULT_INVALID",
+                str(error),
+                diagnostic=host_diagnostic.summary,
+            ) from error
         return GenerationResult(
             provider_name=self.name,
             provider_request_id=task_id,
@@ -208,6 +229,8 @@ class DashScopeProvider:
                 "task_status_sequence": "->".join(statuses),
                 "poll_http_statuses": ",".join(map(str, poll_codes)),
                 "download_http_status": str(image.status_code),
+                "result_host_allowlisted": "yes" if host_diagnostic.allowlisted else "no",
+                "result_host_digest": host_diagnostic.host_digest or "unavailable",
             },
             content=image.content,
             content_type=image.content_type,
