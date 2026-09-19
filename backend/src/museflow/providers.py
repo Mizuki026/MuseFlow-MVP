@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-import base64
 import hashlib
 import os
+import struct
 import time
+import zlib
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -97,11 +98,42 @@ class MockScenario(StrEnum):
     PERMANENT_FAILURE = "permanent_failure"
 
 
+def _png_chunk(chunk_type: bytes, payload: bytes) -> bytes:
+    body = chunk_type + payload
+    return struct.pack(">I", len(payload)) + body + struct.pack(">I", zlib.crc32(body) & 0xFFFFFFFF)
+
+
+def _build_mock_png() -> bytes:
+    """Build a deterministic, visible image for the local demo provider."""
+    width = height = 1280
+    pixels = bytearray()
+    for y in range(height):
+        pixels.append(0)
+        for x in range(width):
+            if (x - 960) ** 2 + (y - 270) ** 2 <= 150**2:
+                color = (245, 181, 95)
+            elif y > 600 + abs(x - 640) // 3:
+                color = (44, 66, 83)
+            elif y > 760 + abs(x - 640) // 5:
+                color = (21, 37, 49)
+            elif y >= 700:
+                color = (18, 28, 47)
+            else:
+                color = (39, 29, 74)
+            pixels.extend(color)
+
+    header = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + _png_chunk(b"IHDR", header)
+        + _png_chunk(b"IDAT", zlib.compress(bytes(pixels), level=9))
+        + _png_chunk(b"IEND", b"")
+    )
+
+
 class MockProvider:
     name = "mock"
-    _PNG_1X1 = base64.b64decode(
-        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
-    )
+    _DEMO_PNG = _build_mock_png()
 
     def __init__(
         self,
@@ -139,7 +171,7 @@ class MockProvider:
             provider_request_id=remote_request_id or f"mock-{request_key}",
             result_digest=f"mock-result-{request_key}",
             metadata={"sha256": digest, "content_type": "image/png"},
-            content=self._PNG_1X1,
+            content=self._DEMO_PNG,
             content_type="image/png",
         )
 
