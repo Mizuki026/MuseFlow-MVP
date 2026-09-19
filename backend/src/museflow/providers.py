@@ -230,6 +230,40 @@ class DashScopeProvider:
             raise PermanentProviderError("PROVIDER_INVALID_RESPONSE", "provider task id is missing")
         return task_id
 
+    @staticmethod
+    def _result_url(output: dict[str, Any]) -> str | None:
+        results = output.get("results")
+        if isinstance(results, list):
+            for raw_result in cast(list[object], results):
+                if not isinstance(raw_result, dict):
+                    continue
+                result = cast(dict[str, object], raw_result)
+                value = result.get("url")
+                if isinstance(value, str) and value:
+                    return value
+
+        choices = output.get("choices")
+        if isinstance(choices, list):
+            for raw_choice in cast(list[object], choices):
+                if not isinstance(raw_choice, dict):
+                    continue
+                choice = cast(dict[str, object], raw_choice)
+                raw_message = choice.get("message")
+                if not isinstance(raw_message, dict):
+                    continue
+                message = cast(dict[str, object], raw_message)
+                raw_content = message.get("content")
+                if not isinstance(raw_content, list):
+                    continue
+                for raw_item in cast(list[object], raw_content):
+                    if not isinstance(raw_item, dict):
+                        continue
+                    item = cast(dict[str, object], raw_item)
+                    value = item.get("image")
+                    if isinstance(value, str) and value:
+                        return value
+        return None
+
     def _poll(self, task_id: str, deadline: float) -> tuple[str, list[str], list[int]]:
         statuses: list[str] = []
         codes: list[int] = []
@@ -260,14 +294,8 @@ class DashScopeProvider:
                 self._sleep(min(self._poll_interval_seconds, remaining))
                 continue
             if status == "SUCCEEDED":
-                results: object = cast(object, output.get("results"))
-                result: dict[str, Any] = (
-                    cast(dict[str, Any], results[0])
-                    if isinstance(results, list) and results and isinstance(results[0], dict)
-                    else {}
-                )
-                result_url: object = result.get("url")
-                if not isinstance(result_url, str) or not result_url:
+                result_url = self._result_url(output)
+                if result_url is None:
                     raise PermanentProviderError(
                         "PROVIDER_RESULT_URL_MISSING", "provider result URL is missing"
                     )

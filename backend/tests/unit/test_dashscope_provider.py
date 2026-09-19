@@ -242,7 +242,15 @@ def test_missing_result_url_is_permanent() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.method == "POST":
             return httpx.Response(200, json={"output": {"task_id": "task-1"}})
-        return httpx.Response(200, json={"output": {"task_status": "SUCCEEDED", "results": [{}]}})
+        return httpx.Response(
+            200,
+            json={
+                "output": {
+                    "task_status": "SUCCEEDED",
+                    "choices": [{"message": {"content": [{"type": "image"}]}}],
+                }
+            },
+        )
 
     provider, client = _provider(handler)
     try:
@@ -255,6 +263,50 @@ def test_missing_result_url_is_permanent() -> None:
     finally:
         client.close()
     assert error.value.code == "PROVIDER_RESULT_URL_MISSING"
+
+
+def test_wan26_async_choice_image_url_is_downloaded() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            return httpx.Response(200, json={"output": {"task_id": "task-1"}})
+        if request.url.host == "dashscope-result-bj.oss-cn-beijing.aliyuncs.com":
+            return httpx.Response(200, headers={"content-type": "image/png"}, content=_png())
+        return httpx.Response(
+            200,
+            json={
+                "output": {
+                    "task_id": "task-1",
+                    "task_status": "SUCCEEDED",
+                    "choices": [
+                        {
+                            "finish_reason": "stop",
+                            "message": {
+                                "role": "assistant",
+                                "content": [
+                                    {
+                                        "image": "https://dashscope-result-bj.oss-cn-beijing.aliyuncs.com/result.png?Expires=redacted",
+                                        "type": "image",
+                                    }
+                                ],
+                            },
+                        }
+                    ],
+                }
+            },
+        )
+
+    provider, client = _provider(handler)
+    try:
+        result = provider.generate(
+            GenerationRequest("prompt", DASHSCOPE_SIZE),
+            request_key="key",
+            remote_request_id=None,
+        )
+    finally:
+        client.close()
+    assert result.provider_request_id == "task-1"
+    assert result.metadata["task_status_sequence"] == "SUCCEEDED"
+    assert result.metadata["width"] == "1280"
 
 
 def test_network_timeout_is_transient() -> None:

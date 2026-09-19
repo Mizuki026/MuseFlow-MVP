@@ -85,3 +85,9 @@ DashScope 只从本地进程环境读取 DASHSCOPE_API_KEY 和 DASHSCOPE_API_HOS
 远端任务 ID 由执行层关联到 attempt。结果 URL 经过主机白名单、重定向逐跳校验、网络地址拒绝、流式大小限制、Content-Type、文件头和尺寸校验后才写入私有 MinIO。Provider 不提供 exactly-once；远端已受理但响应丢失时仍可能发生重复调用和费用。
 
 受控冒烟测试不会因为环境变量存在而自动运行。先运行 uv run --directory backend python -m museflow.dashscope_smoke，该命令只检查变量存在并明确不发请求。只有再次确认北京地域/工作空间、模型权限、计费权限、单次最多约 ¥0.20、不得自动重试和遇错立即停止后，才显式追加 --authorize-real-request。日常 pytest、Compose Demo 和 CI 继续只使用 MockProvider。
+
+### 第 5 个窗口结果 URL 核查
+
+Wan2.6 新异步协议的成功结果字段为 `output.choices[].message.content[].image`；适配器同时兼容已记录的旧 `output.results[].url` 结构。缺少可解析结果 URL 时仍返回永久错误并停止，不把任务标记为成功。
+
+上一次唯一真实请求完成提交并进入轮询，但因 `PROVIDER_RESULT_URL_MISSING` 停止，未下载、未写入 MinIO、未重试。本窗口只使用官方样例和脱敏 fixture 验证解析修复，没有再次发起真实请求。适配器修复后的真实端到端链路仍需一次新的、单独授权的受控冒烟测试。

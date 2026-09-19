@@ -795,7 +795,7 @@ MuseFlow/
 - 已补齐仅在 Demo 模式注册的场景任务入口、内部 execution profile、受信本地 CORS 和历史缩略图契约，并通过真实 Compose MockProvider Playwright 流程验证成功、临时恢复、永久失败、手动重试、分页、筛选、下载和刷新恢复；
 - 当前迁移已升级到 `0004_demo_execution_profiles`；本窗口验证结果为后端 `33 passed, 1 skipped`、前端 Vitest `17 passed`、Playwright `4 passed`，前端 build/typecheck/lint、Ruff、Pyright、Alembic check、Compose config 和 diff check 均通过。
 
-下一步进入第 5 个窗口，仅剩实现真实 Provider Adapter 和运行受控真实 Provider 冒烟测试。当前版本仍不承诺公网部署或外部 Provider exactly-once。
+第 5 个窗口已完成真实 Provider Adapter、官方结果字段核对和非付费验证；适配器现兼容 Wan2.6 新异步协议与旧结果结构，缺少结果 URL 仍 fail-closed。此前唯一真实请求因 `PROVIDER_RESULT_URL_MISSING` 未完成下载，本窗口未再次请求；修复后的真实链路仍需一次新的、单独授权的冒烟验证。当前版本仍不承诺公网部署或外部 Provider exactly-once。
 
 ## 24. 参考资料
 
