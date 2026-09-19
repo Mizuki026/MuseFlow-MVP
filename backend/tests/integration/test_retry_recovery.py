@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
@@ -7,6 +8,7 @@ from uuid import UUID, uuid4
 import pytest
 from sqlalchemy import delete, select
 
+from museflow.assets import StoredAsset
 from museflow.db.models import GenerationTaskModel, OutboxMessageModel, TaskEventModel
 from museflow.db.session import create_session_factory
 from museflow.providers import MockProvider, PermanentProviderError, TransientProviderError
@@ -154,4 +156,145 @@ def test_manual_retry_creates_one_linear_child(isolated_session_factory) -> None
             )
     finally:
         _cleanup(isolated_session_factory, child.task.id if "child" in locals() else task_id)
+        _cleanup(isolated_session_factory, task_id)
+
+
+class CrashOnceProvider:
+    name = "crash-once"
+
+    def __init__(self, *, record_remote_request_id: bool) -> None:
+        self.record_remote_request_id = record_remote_request_id
+        self.calls = 0
+
+    def generate(
+        self,
+        request,
+        *,
+        request_key: str,
+        remote_request_id: str | None,
+        on_remote_request_id=None,
+    ):
+        self.calls += 1
+        if self.calls == 1:
+            if self.record_remote_request_id and on_remote_request_id is not None:
+                on_remote_request_id("remote-request-1")
+            raise SystemExit("simulated worker crash")
+        return MockProvider().generate(
+            request,
+            request_key=request_key,
+            remote_request_id=remote_request_id,
+        )
+
+
+class CrashAfterUploadStore:
+    def __init__(self) -> None:
+        self.puts = 0
+        self.written_keys: set[str] = set()
+
+    def put_result(self, *, task_id, attempt_id, content: bytes, content_type: str) -> StoredAsset:
+        self.puts += 1
+        stored = StoredAsset(
+            object_key=f"results/{task_id}/{attempt_id}/0.png",
+            content_type=content_type,
+            size_bytes=len(content),
+            sha256=hashlib.sha256(content).hexdigest(),
+        )
+        self.written_keys.add(stored.object_key)
+        if self.puts == 1:
+            raise RuntimeError("simulated worker crash after object upload")
+        return stored
+
+    def presigned_download(self, object_key: str, *, expires_seconds: int = 300) -> str:
+        raise NotImplementedError
+
+    def check_ready(self) -> None:
+        return None
+
+
+def _current_clock() -> MutableClock:
+    clock = MutableClock()
+    clock.now = datetime.now(UTC)
+    return clock
+
+def _recover_after_crash(factory, task_id: UUID, clock: MutableClock) -> None:
+    clock.now += timedelta(seconds=11)
+    assert RecoverExpiredLeases(factory, clock=clock).run_once() == 1
+
+
+def test_worker_crash_before_provider_call_reuses_unfinished_attempt(
+    isolated_session_factory,
+) -> None:
+    clock = _current_clock()
+    task_id = _create_task(isolated_session_factory, prompt="crash before provider", clock=clock)
+    provider = CrashOnceProvider(record_remote_request_id=False)
+    execute = ExecuteGenerationAttempt(
+        isolated_session_factory, provider, clock=clock, lease_seconds=10
+    )
+    try:
+        with pytest.raises(SystemExit):
+            execute.execute(task_id)
+        _recover_after_crash(isolated_session_factory, task_id, clock)
+        assert execute.execute(task_id).succeeded is True
+        with isolated_session_factory() as session:
+            attempts = list(
+                session.scalars(
+                    select(GenerationAttemptModel).where(GenerationAttemptModel.task_id == task_id)
+                )
+            )
+        assert len(attempts) == 1
+        assert attempts[0].sequence == 1
+    finally:
+        _cleanup(isolated_session_factory, task_id)
+
+
+def test_worker_crash_after_provider_acceptance_reuses_remote_request_id(
+    isolated_session_factory,
+) -> None:
+    clock = _current_clock()
+    task_id = _create_task(isolated_session_factory, prompt="crash after acceptance", clock=clock)
+    provider = CrashOnceProvider(record_remote_request_id=True)
+    execute = ExecuteGenerationAttempt(
+        isolated_session_factory, provider, clock=clock, lease_seconds=10
+    )
+    try:
+        with pytest.raises(SystemExit):
+            execute.execute(task_id)
+        _recover_after_crash(isolated_session_factory, task_id, clock)
+        assert execute.execute(task_id).succeeded is True
+        with isolated_session_factory() as session:
+            attempt = session.scalar(
+                select(GenerationAttemptModel).where(GenerationAttemptModel.task_id == task_id)
+            )
+        assert attempt is not None
+        assert attempt.sequence == 1
+        assert attempt.provider_request_id == "remote-request-1"
+    finally:
+        _cleanup(isolated_session_factory, task_id)
+
+
+def test_worker_crash_after_object_upload_reuses_deterministic_asset(
+    isolated_session_factory,
+) -> None:
+    clock = _current_clock()
+    task_id = _create_task(isolated_session_factory, prompt="crash after upload", clock=clock)
+    store = CrashAfterUploadStore()
+    execute = ExecuteGenerationAttempt(
+        isolated_session_factory,
+        MockProvider(),
+        asset_store=store,
+        clock=clock,
+        lease_seconds=10,
+    )
+    try:
+        with pytest.raises(RuntimeError):
+            execute.execute(task_id)
+        _recover_after_crash(isolated_session_factory, task_id, clock)
+        assert execute.execute(task_id).succeeded is True
+        assert store.puts == 2
+        assert len(store.written_keys) == 1
+        with isolated_session_factory() as session:
+            task = session.get(GenerationTaskModel, task_id)
+        assert task is not None
+        assert task.status == TaskStatus.SUCCEEDED.value
+    finally:
         _cleanup(isolated_session_factory, task_id)
