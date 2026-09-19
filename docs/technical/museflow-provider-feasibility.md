@@ -6,8 +6,8 @@
 - **目标**：验证首个真实图片生成 Provider 是否满足 MuseFlow MVP 的地区、账号、成本、单图固定尺寸、故障恢复、结果下载和窄适配器约束。
 - **候选**：阿里云 Model Studio（百炼）Wan 2.6、Replicate 官方 FLUX.1 Schnell、OpenAI Images GPT Image 2.5 Flare。
 - **证据边界**：关键结论只使用 Provider 官方 API 文档、官方定价、官方地区或账号说明和官方 API reference。
-- **真实调用状态**：前两次分别因 Host/路径配置返回 HTTP 404、旧 API Key 返回 HTTP 401 `InvalidApiKey`，均未获得 `task_id` 并按停止条件结束。用户更换 API Key 后，第三次授权的真实异步提交使用 `n=1`、`size=1280*1280`、`prompt_extend=false`：提交 HTTP 200，任务轮询经历 `RUNNING → SUCCEEDED`，结果下载 HTTP 200；PNG 签名、媒体类型和尺寸验证通过，尺寸为 `1280×1280`，字节数为 1,828,507。完整签名 URL 未写入日志；结果主机以摘要 `0bd1575e39cb` 记录。全程没有重试。
-- **阶段结论**：官方资料调查和一次脱敏成功探针均已完成，阶段 0 **已通过**。外部调用 exactly-once 仍不成立，必须保留产品降级承诺；第 1 个实现窗口可以开始。
+- **真实调用状态**：本窗口唯一一次授权的真实异步提交使用 `n=1`、`size=1280*1280`、`prompt_extend=false`：提交 HTTP 200，任务轮询经历 `RUNNING → SUCCEEDED` 并解析出结果 URL，但安全下载器因结果主机未命中精确白名单而 fail-closed 拒绝；未下载 PNG、未完成尺寸或 checksum 校验，也未写入 MinIO。完整签名 URL、原始响应和实际主机均未写入日志；全程没有重试。
+- **阶段结论**：官方资料调查和非付费脱敏 fixture 验证已完成；本窗口真实 Provider 在结果下载前被安全白名单拒绝，真实成功探针尚未完成，因此阶段 0 不作为真实 Provider 成功承诺依据。外部调用 exactly-once 仍不成立，必须保留产品降级承诺。
 
 本文用以下标记区分结论性质：
 
@@ -367,5 +367,5 @@
 
 本次授权冒烟请求实际走到了结果 URL 下载入口，但在白名单检查处返回 `RESULT_INVALID: result host is not allowed`。工作区没有保留完整签名 URL、原始响应或可用于识别实际主机的脱敏值，因此无法证明实际返回主机是什么，也不能安全增加新的白名单成员。当前行为保持 fail-closed；该失败记录为“结果主机无法安全确认”，而不是 Provider 成功。
 
-本轮没有再次发起真实 Provider 请求。只有在获得脱敏的真实主机证据或新的明确授权并确认配置后，才可重新进行一次受控真实冒烟；在此之前，真实 Provider 不纳入 MVP 成功承诺，Mock Provider 仍是默认实现。
+本轮没有再次发起真实 Provider 请求。适配器现在可在下一次受控请求前输出不含主机明文的精确白名单命中结果和主机摘要；这不会扩大白名单，也不会绕过 SSRF 或重定向校验。只有在获得脱敏的真实主机证据或新的明确授权并确认配置后，才可重新进行一次受控真实冒烟；在此之前，真实 Provider 不纳入 MVP 成功承诺，Mock Provider 仍是默认实现。
 - **第 5 个窗口最新状态**：唯一一次真实请求已提交并轮询到 `SUCCEEDED`，但结果 URL 在安全下载器的精确主机白名单处被拒绝；未下载 PNG、未写入 MinIO，真实 Provider E2E 仍未成功。
