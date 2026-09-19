@@ -6,16 +6,11 @@ MuseFlow 是面向开发者和面试评审者的可靠性作品集项目。MVP �
 
 当前后端工具链使用 Python 3.13、uv、FastAPI、SQLAlchemy、Alembic 和 PostgreSQL。依赖锁文件位于 `backend/uv.lock`。
 
-### 本机 PostgreSQL 测试环境
+### Compose PostgreSQL 测试环境
 
-仓库当前已有一个临时 PostgreSQL 实例监听 `127.0.0.1:55432`，数据库为 `museflow`，并已升级到当前 Alembic revision。它适合第 1 窗口的集成测试，不应被当作长期开发数据库。
+Compose PostgreSQL 通过宿主机 `127.0.0.1:55432` 暴露；数据库名、用户名和密码必须以当前 `compose.yaml` 的 PostgreSQL 服务配置为准。不要继续使用旧的临时实例连接串，也不要把实际凭据写入文档、脚本或日志。
 
-在 PowerShell 中，为当前终端设置变量：
-
-```powershell
-$env:MUSEFLOW_TEST_DATABASE_URL = "postgresql+psycopg://postgres@127.0.0.1:55432/museflow"
-$env:MUSEFLOW_DATABASE_URL = $env:MUSEFLOW_TEST_DATABASE_URL
-```
+宿主机运行测试时，将 `MUSEFLOW_TEST_DATABASE_URL` 设置为当前 Compose PostgreSQL 的宿主连接串（主机为 `127.0.0.1`、端口为 `55432`），并同步设置 `MUSEFLOW_DATABASE_URL`。Compose 内部服务则使用服务名 `postgres` 和容器端口 `5432`，不要把内部地址用于宿主机测试。
 
 然后运行迁移、测试和 API：
 
