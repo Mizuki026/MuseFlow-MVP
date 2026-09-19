@@ -793,7 +793,7 @@ MuseFlow/
 - 第 4 个实现窗口已完成正式 React 前端：创建、详情、历史、非终态轮询、cursor 分页、状态筛选、事件时间线、错误展示、手动重试和稳定结果下载入口；
 - 前端状态与错误契约由 FastAPI OpenAPI 生成，服务端状态由 TanStack Query 管理，创建与重试使用稳定的业务提交幂等键；
 - 已补齐仅在 Demo 模式注册的场景任务入口、内部 execution profile、受信本地 CORS 和历史缩略图契约，并通过真实 Compose MockProvider Playwright 流程验证成功、临时恢复、永久失败、手动重试、分页、筛选、下载和刷新恢复；
-- 当前迁移已升级到 0004_demo_execution_profiles；第 6 窗口最终验收后后端 67 passed, 0 skipped，前端 Vitest 17 passed、Playwright 4 passed，前端 build/typecheck/lint、Ruff、Pyright、compileall、Alembic check、Compose config 和 diff check 均通过。
+- 当前迁移已升级到 0004_demo_execution_profiles；第 6 窗口最终验收后后端 70 passed, 0 skipped，前端 Vitest 17 passed、Playwright 4 passed，前端 build/typecheck/lint、Ruff、Pyright、compileall、Alembic check、Compose config 和 diff check 均通过。
 
 第 5 个窗口已完成一次受控真实 Provider E2E；第 6 窗口完成了默认 MockProvider 正式演示、可靠性边界、Compose 健康检查和交付文档验收。当前版本仍不承诺公网部署或外部 Provider exactly-once。
 
