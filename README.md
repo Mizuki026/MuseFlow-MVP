@@ -8,7 +8,7 @@ MuseFlow 是面向开发者和面试评审者的可靠性作品集项目。MVP �
 
 ### 本地演示：Compose + 正式前端
 
-Docker Desktop、Docker Compose、Node.js 24.18.0/npm 和 uv 是本地演示的前置条件。Compose 所有端口只绑定到 `127.0.0.1`；MuseFlow MVP 没有认证、限流、用户隔离或公网滥用防护，**不得直接暴露到公网**。
+Docker Desktop、Docker Compose、Node.js 24.18.0/npm 和 uv 是本地演示的前置条件。首次构建还需要 Docker Desktop 能访问 Docker Hub 和 Quay 的镜像 registry，或已经缓存所需镜像；Compose 所有端口只绑定到 `127.0.0.1`。MuseFlow MVP 没有认证、限流、用户隔离或公网滥用防护，**不得直接暴露到公网**。
 
 首次运行或代码更新后，在仓库根目录执行：
 
@@ -56,7 +56,7 @@ docker compose down -v
 docker compose up -d --build
 ```
 
-排障时先执行 `docker compose ps --all`、`docker compose logs --tail=100 api scheduler worker minio`。迁移失败看 `docker compose logs migrate`，MinIO bucket 初始化失败看 `docker compose logs minio-init`；确认依赖恢复后可用 `docker compose up -d --force-recreate <service>` 重启单个服务。宿主机测试数据库必须使用当前 Compose 的 PostgreSQL 用户、密码、数据库名和 `127.0.0.1:55432` 端口，并通过 `MUSEFLOW_TEST_DATABASE_URL` 传入；不要使用旧临时实例连接串。
+排障时先执行 `docker compose ps --all`、`docker compose logs --tail=100 api scheduler worker minio`。如果构建报 `failed to fetch oauth token`、`auth.docker.io` 或 `registry-1.docker.io` 超时，先在 Docker Desktop 中检查代理/网络，或在可访问 Docker Hub 的网络中预拉取 `python:3.13-slim` 等基础镜像；这是 registry 可达性问题，Compose 配置本身不会通过重试解决。迁移失败看 `docker compose logs migrate`，MinIO bucket 初始化失败看 `docker compose logs minio-init`；确认依赖恢复后可用 `docker compose up -d --force-recreate <service>` 重启单个服务。宿主机测试数据库必须使用当前 Compose 的 PostgreSQL 用户、密码、数据库名和 `127.0.0.1:55432` 端口，并通过 `MUSEFLOW_TEST_DATABASE_URL` 传入；不要使用旧临时实例连接串。
 
 ### 当前环境审核与窗口边界
 
