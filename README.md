@@ -2,7 +2,7 @@
 
 MuseFlow 是面向开发者和面试评审者的可靠性作品集项目。MVP 只允许在本机或受信网络运行，**不得直接暴露到公网**。
 
-## 第 1 窗口：任务核心与 HTTP API
+## 第 1 窗口历史记录：任务核心与 HTTP API
 
 当前后端工具链使用 Python 3.13、uv、FastAPI、SQLAlchemy、Alembic 和 PostgreSQL。依赖锁文件位于 `backend/uv.lock`。
 
@@ -58,9 +58,9 @@ docker compose up -d --build
 
 排障时先执行 `docker compose ps --all`、`docker compose logs --tail=100 api scheduler worker minio`。如果构建报 `failed to fetch oauth token`、`auth.docker.io` 或 `registry-1.docker.io` 超时，先在 Docker Desktop 中检查代理/网络，或在可访问 Docker Hub 的网络中预拉取 `python:3.13-slim` 等基础镜像；这是 registry 可达性问题，Compose 配置本身不会通过重试解决。迁移失败看 `docker compose logs migrate`，MinIO bucket 初始化失败看 `docker compose logs minio-init`；确认依赖恢复后可用 `docker compose up -d --force-recreate <service>` 重启单个服务。宿主机测试数据库必须使用当前 Compose 的 PostgreSQL 用户、密码、数据库名和 `127.0.0.1:55432` 端口，并通过 `MUSEFLOW_TEST_DATABASE_URL` 传入；不要使用旧临时实例连接串。
 
-### 当前环境审核与窗口边界
+### 当前环境审核与历史窗口边界
 
-Docker Desktop、Docker Engine 和 Docker Compose 已可用；Redis 与 MinIO 已通过 Compose 启动并完成健康检查。第 1 窗口的业务代码保持 PostgreSQL、任务领域和 HTTP API 边界不变，不因为这些依赖已就绪而提前引入 Scheduler、Celery、Worker、Provider 或对象存储逻辑。
+Docker Desktop、Docker Engine 和 Docker Compose 已可用；Redis 与 MinIO 已通过 Compose 启动并完成健康检查。第 1 窗口阶段的业务代码范围是 PostgreSQL、任务领域和 HTTP API；当时刻意没有提前引入 Scheduler、Celery、Worker、Provider 或对象存储逻辑。这里记录的是实施历史，不是当前版本的运行边界；当前 Compose 已包含这些组件，完整交付状态以本文后续说明和技术方案中的当前验证快照为准。
 
 `127.0.0.1:55432` 的隔离 PostgreSQL 现在也是宿主机集成测试的可复现入口，不是 Redis 或 MinIO 的替代方案，也不与 Compose 依赖冲突。Compose 内部服务使用 `postgres`、`redis` 和 `minio` 服务名；宿主机测试使用 `127.0.0.1` 和映射端口。Provider 仍需显式配置和受控验证，不存在自动替代承诺。
 ## 前端环境

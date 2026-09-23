@@ -7,7 +7,8 @@
 - **文档事实**：Wan2.6 文生图异步 API 不定义顶层 `result_url` 字段。
 - **文档事实**：当前 Wan2.6 API 参考中的异步成功响应，把 PNG 结果 URL 放在 `output.choices[].message.content[].image`。
 - **文档事实**：另一份官方《Wan 文生图 V2 API 参考》的异步示例，把结果放在 `output.results[].url`。这说明官方文档存在版本/协议展示差异，不能仅凭字段名猜测。
-- **基于仓库现状的推断**：当前适配器只读取 `output.results[0].url`。如果真实响应采用当前 Wan2.6 文档展示的 `choices/message/content/image` 结构，则 `PROVIDER_RESULT_URL_MISSING` 是适配器解析契约不匹配，而不是 Provider 没有生成结果。
+- **代码事实**：当前适配器已兼容 `output.results[].url` 与 `output.choices[].message.content[].image` 两种已记录结构。此前“只读取 `output.results[0].url`”描述的是修复前状态，不代表当前代码。
+- **历史故障判断**：如果历史真实响应采用当前 Wan2.6 文档展示的 `choices/message/content/image` 结构，则当时的 `PROVIDER_RESULT_URL_MISSING` 是适配器解析契约不匹配，而不是 Provider 没有生成结果；但原始响应未保存，无法确认本次历史响应实际采用哪种结构。
 - **尚不能确认**：本研究没有读取或恢复真实请求的原始/脱敏响应，因此不能证明本次真实响应实际采用了哪一种官方结构，也不能据此确认账号、区域或权限限制。
 
 ## 官方异步契约
@@ -93,7 +94,7 @@ GET https://{WorkspaceId}.cn-beijing.maas.aliyuncs.com/api/v1/tasks/{task_id}
 }
 ```
 
-该页面同时说明 `results[].url` 是图像 URL，并展示了部分成功时的结果列表。两份官方页面对 Wan2.6 异步结果字段的展示不一致；因此，适配器应以实际使用的官方协议版本和脱敏响应 fixture 为依据，不能把顶层 `result_url` 当作官方字段。
+该页面同时说明 `results[].url` 是图像 URL，并展示了部分成功时的结果列表。两份官方页面对 Wan2.6 异步结果字段的展示不一致；当前适配器已经兼容这两种已记录的嵌套结构，但仍应以实际使用的官方协议版本和脱敏响应 fixture 为依据，不能把顶层 `result_url` 当作官方字段。
 
 ## 北京 Host、权限与计费
 
@@ -108,7 +109,7 @@ GET https://{WorkspaceId}.cn-beijing.maas.aliyuncs.com/api/v1/tasks/{task_id}
 
 | 判断 | 结论 | 依据 |
 | --- | --- | --- |
-| A. 适配器解析错误 | **较强推断，待脱敏响应确认** | 当前适配器读取 `output.results[0].url`；当前 Wan2.6 官方示例使用 `output.choices[].message.content[].image`。 |
+| A. 适配器解析错误 | **历史故障中的较强推断，原始响应仍待确认** | 修复前适配器只读取 `output.results[0].url`；当前适配器已兼容 `output.results[].url` 和 `output.choices[].message.content[].image`。 |
 | B. Host/区域/权限/模型限制 | **无法由该错误确认** | 官方文档说明这些限制通常表现为鉴权/服务错误；未提供本次真实响应。 |
 | C. Provider 成功但没有可下载结果 | **不符合官方成功契约** | 官方明确写明 `SUCCEEDED` 响应包含图像 URL。 |
 | D. 产品契约与 Provider 能力不一致 | **已确认存在字段契约风险** | 产品内部使用 `result_url` 概念，但官方返回的是嵌套字段；且官方不同页面展示了两种嵌套形态。 |
