@@ -797,6 +797,14 @@ MuseFlow/
 
 第 5 个窗口已完成一次受控真实 Provider E2E；第 6 窗口完成了默认 MockProvider 正式演示、可靠性边界、Compose 健康检查和交付文档验收。当前版本仍不承诺公网部署或外部 Provider exactly-once。
 
+### 当前工作树验证快照（2026-09-23）
+
+- 第 6 窗口验收条目中的 `70 passed, 0 skipped`，以及 Provider 可行性文档中的 `67 passed, 0 skipped`，均保留为对应历史运行记录，不代表当前工作树的即时测试数量。
+- 默认环境运行 `uv run --directory backend pytest -q`（未设置 `MUSEFLOW_TEST_DATABASE_URL`）：`50 passed, 29 skipped`；跳过项属于数据库、Redis、Worker 或 MinIO 依赖的集成测试。
+- Compose PostgreSQL 环境运行同一命令，并通过 `MUSEFLOW_TEST_DATABASE_URL` 注入指向 `127.0.0.1:55432/museflow` 的测试数据库：`76 passed, 3 skipped`。本机使用 IPv4 回环地址以避免 `localhost` 的 SQLAlchemy/IPv6 连接等待；这不是应用业务行为变更。
+- 前端运行 `npm run test`：`17 passed`；`npm run typecheck`、`npm run lint` 和 `npm run build` 均通过。
+- 后端 `ruff check src tests` 和 `pyright` 均通过；全量测试仍有既有的 2 条依赖弃用警告。
+
 ## 24. 参考资料
 
 - [FastAPI Documentation](https://fastapi.tiangolo.com/)
