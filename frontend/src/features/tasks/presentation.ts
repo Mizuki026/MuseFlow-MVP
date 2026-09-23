@@ -9,6 +9,7 @@ export const statusLabels: Record<TaskStatus, string> = {
 }
 
 export const eventLabels: Record<string, string> = {
+  RESULT_STORAGE_FAILED: "\u7ed3\u679c\u4fdd\u5b58\u5931\u8d25\uff0c\u7b49\u5f85\u6062\u590d",
   TASK_QUEUED: '任务进入队列',
   ATTEMPT_STARTED: '开始生成',
   ATTEMPT_RECLAIMED: '恢复执行',
@@ -18,6 +19,8 @@ export const eventLabels: Record<string, string> = {
 }
 
 export const phaseLabels: Record<string, string> = {
+  RESULT_PERSISTING: "\u6b63\u5728\u4fdd\u5b58\u7ed3\u679c",
+  RESULT_STORAGE_FAILED: "\u7ed3\u679c\u4fdd\u5b58\u5931\u8d25",
   PROVIDER_RUNNING: '正在调用生成服务',
   PROVIDER_FAILED: '生成服务返回错误',
   RESULT_PERSISTED: '结果已安全保存',

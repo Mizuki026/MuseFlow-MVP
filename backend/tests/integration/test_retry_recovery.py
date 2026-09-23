@@ -131,7 +131,11 @@ def test_expired_worker_token_cannot_commit_after_takeover(isolated_session_fact
         _cleanup(isolated_session_factory, task_id)
 
 
-def test_manual_retry_creates_one_linear_child(isolated_session_factory) -> None:
+@pytest.mark.parametrize(
+    "error_code",
+    ["RETRY_EXHAUSTED", "PROVIDER_NOT_CONFIGURED", "PROVIDER_AUTHENTICATION"],
+)
+def test_manual_retry_creates_one_linear_child(isolated_session_factory, error_code: str) -> None:
     clock = MutableClock()
     task_id = _create_task(isolated_session_factory, prompt="manual retry", clock=clock)
     try:
@@ -139,8 +143,8 @@ def test_manual_retry_creates_one_linear_child(isolated_session_factory) -> None
             task = session.get(GenerationTaskModel, task_id)
             assert task is not None
             task.status = TaskStatus.FAILED.value
-            task.error_code = "RETRY_EXHAUSTED"
-            task.error_message = "automatic retries exhausted"
+            task.error_code = error_code
+            task.error_message = f"failed with {error_code}"
         create = CreateTask(isolated_session_factory, clock=clock)
         child = create.execute(
             CreateTaskRequest(prompt="manual retry"),
@@ -184,6 +188,137 @@ class CrashOnceProvider:
             request_key=request_key,
             remote_request_id=remote_request_id,
         )
+
+
+class FailingResultStore:
+    def __init__(self, failures: int | None) -> None:
+        self.failures = failures
+        self.calls = 0
+
+    def put_result(self, *, task_id, attempt_id, content: bytes, content_type: str) -> StoredAsset:
+        self.calls += 1
+        if self.failures is None or self.calls <= self.failures:
+            raise RuntimeError("simulated object store outage")
+        return StoredAsset(
+            object_key=f"results/{task_id}/{attempt_id}/0.png",
+            content_type=content_type,
+            size_bytes=len(content),
+            sha256=hashlib.sha256(content).hexdigest(),
+        )
+
+    def presigned_download(self, object_key: str, *, expires_seconds: int = 300) -> str:
+        raise NotImplementedError
+
+    def check_ready(self) -> None:
+        return None
+
+
+def test_result_storage_failure_reuses_same_attempt_and_recovers(
+    isolated_session_factory,
+) -> None:
+    clock = _current_clock()
+    task_id = _create_task(isolated_session_factory, prompt="storage recovery", clock=clock)
+    store = FailingResultStore(failures=1)
+    execute = ExecuteGenerationAttempt(
+        isolated_session_factory,
+        MockProvider(),
+        asset_store=store,
+        clock=clock,
+        lease_seconds=10,
+    )
+    try:
+        with pytest.raises(RuntimeError, match="simulated object store outage"):
+            execute.execute(task_id)
+        with isolated_session_factory() as session:
+            task = session.get(GenerationTaskModel, task_id)
+            attempt = session.scalar(
+                select(GenerationAttemptModel).where(GenerationAttemptModel.task_id == task_id)
+            )
+            events = list(
+                session.scalars(
+                    select(TaskEventModel)
+                    .where(TaskEventModel.task_id == task_id)
+                    .order_by(TaskEventModel.created_at, TaskEventModel.id)
+                )
+            )
+        assert task is not None and task.status == TaskStatus.RUNNING.value
+        assert task.error_code == "RESULT_STORAGE_ERROR"
+        assert attempt is not None
+        assert attempt.sequence == 1
+        assert attempt.status == "RUNNING"
+        assert attempt.phase == "RESULT_PERSISTING"
+        assert attempt.error_code == "RESULT_STORAGE_ERROR"
+        assert {event.event_type for event in events} == {
+            "TASK_QUEUED",
+            "ATTEMPT_STARTED",
+            "RESULT_STORAGE_FAILED",
+        }
+
+        clock.now += timedelta(seconds=11)
+        assert RecoverExpiredLeases(isolated_session_factory, clock=clock).run_once() == 1
+        assert execute.execute(task_id).succeeded is True
+
+        with isolated_session_factory() as session:
+            task = session.get(GenerationTaskModel, task_id)
+            attempts = list(
+                session.scalars(
+                    select(GenerationAttemptModel)
+                    .where(GenerationAttemptModel.task_id == task_id)
+                    .order_by(GenerationAttemptModel.sequence)
+                )
+            )
+        assert task is not None and task.status == TaskStatus.SUCCEEDED.value
+        assert len(attempts) == 1
+        assert attempts[0].status == "SUCCEEDED"
+        assert attempts[0].phase == "RESULT_PERSISTED"
+    finally:
+        _cleanup(isolated_session_factory, task_id)
+
+
+def test_result_storage_failure_keeps_diagnostic_code_at_deadline(
+    isolated_session_factory,
+) -> None:
+    clock = _current_clock()
+    task_id = _create_task(
+        isolated_session_factory,
+        prompt="storage deadline",
+        policy=TaskPolicy(max_attempts=3, policy_version="test", deadline_seconds=15),
+        clock=clock,
+    )
+    execute = ExecuteGenerationAttempt(
+        isolated_session_factory,
+        MockProvider(),
+        asset_store=FailingResultStore(failures=None),
+        clock=clock,
+        lease_seconds=5,
+    )
+    try:
+        with pytest.raises(RuntimeError):
+            execute.execute(task_id)
+        clock.now += timedelta(seconds=6)
+        assert RecoverExpiredLeases(isolated_session_factory, clock=clock).run_once() == 1
+        with pytest.raises(RuntimeError):
+            execute.execute(task_id)
+        clock.now += timedelta(seconds=6)
+        assert RecoverExpiredLeases(isolated_session_factory, clock=clock).run_once() == 1
+        with pytest.raises(RuntimeError):
+            execute.execute(task_id)
+        clock.now += timedelta(seconds=6)
+        assert RecoverExpiredLeases(isolated_session_factory, clock=clock).run_once() == 1
+
+        with isolated_session_factory() as session:
+            task = session.get(GenerationTaskModel, task_id)
+            attempt = session.scalar(
+                select(GenerationAttemptModel).where(GenerationAttemptModel.task_id == task_id)
+            )
+        assert task is not None and task.status == TaskStatus.FAILED.value
+        assert task.error_code == "RESULT_STORAGE_ERROR"
+        assert attempt is not None
+        assert attempt.status == "FAILED"
+        assert attempt.phase == "RESULT_STORAGE_FAILED"
+        assert attempt.error_code == "RESULT_STORAGE_ERROR"
+    finally:
+        _cleanup(isolated_session_factory, task_id)
 
 
 class CrashAfterUploadStore:

@@ -96,14 +96,21 @@ class RecoverExpiredLeases:
                 if attempt is None or attempt.status != "RUNNING" or attempt.lease_expires_at > now:
                     continue
                 if task.deadline_at <= now:
+                    storage_failed = attempt.error_code == "RESULT_STORAGE_ERROR"
+                    error_code = attempt.error_code if storage_failed else "DEADLINE_EXCEEDED"
+                    error_message = (
+                        attempt.error_message
+                        if storage_failed and attempt.error_message
+                        else "task deadline exceeded"
+                    )
                     attempt.status = "FAILED"
-                    attempt.phase = "LEASE_EXPIRED"
-                    attempt.error_code = "DEADLINE_EXCEEDED"
-                    attempt.error_message = "task deadline exceeded"
+                    attempt.phase = "RESULT_STORAGE_FAILED" if storage_failed else "LEASE_EXPIRED"
+                    attempt.error_code = error_code
+                    attempt.error_message = error_message
                     attempt.finished_at = now
                     task.status = TaskStatus.FAILED.value
-                    task.error_code = "DEADLINE_EXCEEDED"
-                    task.error_message = "task deadline exceeded"
+                    task.error_code = error_code
+                    task.error_message = error_message
                     task.completed_at = now
                     event_type = "TASK_FAILED"
                 else:
@@ -117,7 +124,7 @@ class RecoverExpiredLeases:
                         id=uuid4(),
                         task_id=task.id,
                         event_type=event_type,
-                        payload={"attempt_id": str(attempt.id)},
+                        payload={"attempt_id": str(attempt.id), "error_code": task.error_code},
                         created_at=now,
                     )
                 )

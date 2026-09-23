@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import random
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
@@ -19,6 +20,8 @@ from museflow.providers import (
 )
 from museflow.tasks.domain import RetryPolicy, TaskStatus
 from museflow.tasks.execution_models import GenerationAttemptModel
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,6 +83,7 @@ class ExecuteGenerationAttempt:
             return ExecutionOutcome(task_id, claim.attempt_id, executed=True, succeeded=False)
 
         try:
+            self._mark_result_persisting(claim)
             stored = self._store_result(claim, result)
         except ValueError as error:
             self._fail(
@@ -87,6 +91,18 @@ class ExecuteGenerationAttempt:
                 ProviderError("RESULT_INVALID", str(error), retryable=False),
             )
             return ExecutionOutcome(task_id, claim.attempt_id, executed=True, succeeded=False)
+        except Exception:
+            self._record_result_storage_failure(claim)
+            logger.exception(
+                "result storage failed",
+                extra={
+                    "task_id": str(claim.task_id),
+                    "attempt_id": str(claim.attempt_id),
+                    "provider_name": getattr(self._provider, "name", "mock"),
+                    "error_code": "RESULT_STORAGE_ERROR",
+                },
+            )
+            raise
 
         # A transport/storage crash is deliberately allowed to escape. The lease and
         # the stable attempt key make the next delivery retry the same attempt.
@@ -102,6 +118,51 @@ class ExecuteGenerationAttempt:
             content=result.content,
             content_type=result.content_type,
         )
+
+    def _mark_result_persisting(self, claim: ExecutionClaim) -> bool:
+        now = self._clock()
+        with self._session_factory.begin() as session:
+            attempt = session.get(GenerationAttemptModel, claim.attempt_id, with_for_update=True)
+            task = session.get(GenerationTaskModel, claim.task_id, with_for_update=True)
+            if (
+                attempt is None
+                or task is None
+                or not self._claim_is_current(attempt, task, claim, now)
+            ):
+                return False
+            attempt.phase = "RESULT_PERSISTING"
+            task.version += 1
+            return True
+
+    def _record_result_storage_failure(self, claim: ExecutionClaim) -> bool:
+        now = self._clock()
+        error_code = "RESULT_STORAGE_ERROR"
+        error_message = "result storage failed; the current attempt will be recovered"
+        with self._session_factory.begin() as session:
+            attempt = session.get(GenerationAttemptModel, claim.attempt_id, with_for_update=True)
+            task = session.get(GenerationTaskModel, claim.task_id, with_for_update=True)
+            if (
+                attempt is None
+                or task is None
+                or not self._claim_is_current(attempt, task, claim, now)
+            ):
+                return False
+            attempt.phase = "RESULT_PERSISTING"
+            attempt.error_code = error_code
+            attempt.error_message = error_message
+            task.error_code = error_code
+            task.error_message = error_message
+            task.version += 1
+            session.add(
+                TaskEventModel(
+                    id=uuid4(),
+                    task_id=claim.task_id,
+                    event_type="RESULT_STORAGE_FAILED",
+                    payload={"attempt_id": str(claim.attempt_id), "error_code": error_code},
+                    created_at=now,
+                )
+            )
+            return True
 
     def _claim(self, task_id: UUID) -> ExecutionClaim | None:
         now = self._clock()

@@ -89,6 +89,8 @@ def retry_is_allowed(error_code: str | None) -> bool:
         "PROVIDER_UNAVAILABLE",
         "PROVIDER_RATE_LIMITED",
         "PROVIDER_TIMEOUT",
+        "PROVIDER_NOT_CONFIGURED",
+        "PROVIDER_AUTHENTICATION",
         "RESULT_STORAGE_ERROR",
         "RETRY_EXHAUSTED",
         "DEADLINE_EXCEEDED",
