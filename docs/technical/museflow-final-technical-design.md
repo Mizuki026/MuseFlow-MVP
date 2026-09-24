@@ -1,7 +1,7 @@
 # MuseFlow 最终版本技术方案
 
 - 版本：v0.2
-- 状态：分阶段实施中（阶段 4 完成，阶段 5 待开始）
+- 状态：分阶段实施中（阶段 5 完成；阶段 6 Adapter 待实施）
 - 更新日期：2026-09-24
 - 对应产品文档：[MuseFlow 最终产品设计文档](../product/museflow-product-design.md)
 - 基线方案：[MuseFlow MVP 技术方案](./museflow-mvp-technical-design.md)
@@ -723,13 +723,18 @@ Playwright 使用 `MockProvider` 覆盖：
 - 真实 PostgreSQL、MinIO、Redis、Scheduler 和 maintenance Worker 路径均实际验证；具体命令、结果、全量测试门禁和非阻断的历史 Ruff 失败见第 21 节。前端文件选择、预览与完整 UI Compose E2E 按范围留到阶段 7。
 - 实现提交：`06e9ccb`（图片完整校验）、`a68addd`（上传与稳定访问）、`0842fad`（维护队列与显式清理）、`dd5cb9a`（Pyright 严格模式下的格式类型收窄）、`27c42d2`（短期签名访问验证）。文档提交 SHA 由本阶段交付报告记录。
 
-### 阶段 5：图生图领域与 Mock 链路
+### 阶段 5：图生图领域与 Mock 链路（已完成）
 
-- 扩展任务创建、指纹、历史筛选和手动重试。
-- 扩展 `GenerationProvider`、Provider registry 与 `MockProvider`。
-- 让图生图完整复用加固后的执行链路。
+- 任务领域以 `TextToImageInput | ImageToImageInput` 区分两类输入。文生图仍允许省略 `generation_type`，并保持原幂等指纹序列化；图生图指纹加入 `IMAGE_TO_IMAGE`、reference asset ID 和服务端核验的 SHA-256。任务创建后输入及 Provider/policy 快照不可变。
+- 创建图生图任务在单个短 PostgreSQL 事务中先检查幂等重放、校验冻结 profile 的 capability/availability，再通过 `SELECT ... FOR UPDATE` 锁定 READY 素材并读取其摘要，最后写入 task、event 和 outbox。该事务不访问 MinIO 或 Provider；图生图不支持的 profile 在入队前稳定返回 4xx，未知/不可用 profile 稳定返回 503。
+- API 与 Worker 共用静态 capability registry。Mock profile 同时支持文生图和图生图；现有 DashScope profile 仍只支持文生图，不将未实现的正式图生图 Adapter 表示为可用。Worker 根据 task 保存的冻结 profile/provider/model/capability 创建 Adapter，不回退到当前默认配置。
+- `GenerationProvider` 使用短生命周期 `ProviderGenerationRequest`，图生图输入包含 `VerifiedReferenceImage` 实际 bytes、MIME、宽高和 SHA，不传 ORM、DTO、对象键或签名 URL。Worker 在 `INPUT_LOADING` 通过 `ReferenceAssetReader` 读取 MinIO 对象、重算摘要并复核数据库大小、MIME、尺寸和图片完整性；损坏/缺失 fail closed，临时对象存储错误保持同 attempt 恢复。
+- `MockProvider` 从已验证参考 bytes 解码、缩放并合成确定性结果，输出 PNG；结果依赖规范化 prompt、尺寸、参考 SHA、稳定 request key 和场景。记录 create/recovery/poll/result-fetch 调用与生成类型、参考摘要。测试在同一运行时验证相同输入字节稳定、不同参考图片输出不同，并验证远端 ID 恢复不重复创建。
+- 手动重试只有幂等键入口；事务锁定失败源任务，要求该错误码允许重试、尚无子任务、冻结 profile 仍可用，并重新锁定同一 READY 素材及同一 SHA。子任务复制规范化输入、reference ID/SHA、Provider/capability 和 policy 快照，通过唯一 `retried_from_task_id` 约束保持线性链。历史接口增加 `generation_type` 筛选，可与 status 组合，保持原 cursor 排序与编码。
+- 详情返回区分的输入摘要、reference ID/SHA、稳定素材下载路径和 Provider/policy 快照；不返回对象键、素材 bytes 或签名 URL。OpenAPI 和生成 TypeScript 类型已更新；生成器设置 `--default-non-nullable false`，使带默认值的 `generation_type` 继续反映 OpenAPI 的可选请求字段。
+- 阶段 5 无需新增 Alembic migration；真实 Compose 图生图使用既有 head `0007_reference_operation_leases`。没有实现正式 `wan2.6-image` Adapter、`SafeArtifactFetcher` 或前端图生图 UI。
 
-验收：Mock 图生图成功及全部故障场景在真实 PostgreSQL、Redis、Worker、Scheduler 和 MinIO 链路中通过。
+验收：真实隔离 PostgreSQL、Redis、MinIO、Scheduler、generation Worker 和 maintenance Worker 均运行；Mock 图生图上传 API 到权威结果及访问路径通过。临时/永久 Provider 故障、reference 读取暂时失败、缺失/篡改对象、remote ID 同 attempt 恢复、fencing、手动重试、历史筛选及文生图回归通过。
 
 ### 阶段 6：正式图生图 Adapter
 
@@ -808,7 +813,7 @@ Playwright 使用 `MockProvider` 覆盖：
 
 阶段 0 已完成并得出 `CONDITIONAL GO`；阶段 1 的不可变候选和数据库权威结果 fencing 已完成；阶段 2 的 heartbeat、稳定 phase、失败责任域和恢复边界已实现并通过验证；阶段 3 的兼容 schema、确定性 backfill 与旧 API/数据读取验证已完成。
 
-阶段 4 已完成参考图片上传、私有存储、稳定访问、恢复和显式维护删除；阶段 5 可开始实现图生图任务领域与 Mock 全链路。历史结果宽高仍 nullable，回填继续由独立数据收尾流程处理。默认 Compose 数据库尚未应用迁移；任何实际部署都必须先备份目标数据库，再升级到 `0007_reference_operation_leases` 并核对迁移后数据量。正式 Adapter、`SafeArtifactFetcher`、前端上传 UI 与完整 UI Compose E2E 仍分别留给阶段 6/7。
+阶段 4 已完成参考图片上传、私有存储、稳定访问、恢复和显式维护删除；阶段 5 已完成图生图领域、冻结参考输入、Mock 执行、手动重试、历史筛选及真实后端链路验收，具备开展阶段 6 Adapter 实现的工程前置。历史结果宽高仍 nullable，回填继续由独立数据收尾流程处理。默认 Compose 数据库尚未应用迁移；任何实际部署都必须先备份目标数据库，再升级到 `0007_reference_operation_leases` 并核对迁移后数据量。正式 `wan2.6-image` Adapter 和 `SafeArtifactFetcher` 留给阶段 6；真实收费端到端调用仍需单独授权。前端生成类型选择、上传 UI 与完整 UI Compose E2E 留给阶段 7。
 
 产品与架构决策已经在 2026-09-24 的审查中收敛。每次真实图生图请求仍需要单独确认账号、地域、费用、请求参数和单次授权；文档结论本身不构成付费调用授权。
 
@@ -860,6 +865,20 @@ Playwright 使用 `MockProvider` 覆盖：
 - 使用隔离 Compose PostgreSQL 执行 `uv run --directory backend alembic check`：`No new upgrade operations detected`。`docker compose config --quiet`、`git diff --check` 通过。以独立项目名运行完整 `docker compose up -d --build` 后，再单独执行 `MUSEFLOW_RUN_REAL_COMPOSE_E2E_TEST=1 uv run --directory backend pytest -q tests/integration/test_real_compose_mock_e2e.py`，结果 `1 passed in 9.10s`；覆盖任务投递、Compose Worker、私有 MinIO 写入及签名下载/过期。该测试由 host-side 应用用例和 dispatcher 驱动，不覆盖 HTTP API/前端交互；API 兼容由独立 API 测试覆盖。测试项目使用独立命名卷，down 时未传 `-v`，默认 `museflow` 卷未连接或清空。
 - 初始服务检查发现仓库默认 Compose 数据库未监听 `127.0.0.1:55432`。因此没有对仓库默认数据卷应用迁移；历史兼容性通过真实 PostgreSQL 上从 `0004` 迁移的隔离 MVP 形态 fixture 验证。fixture 不是默认卷的生产备份，部署前仍应在目标数据库备份后执行迁移并核对数据量。
 - 代码提交：`27427fb`（`feat: 增加兼容任务快照与参考素材迁移`）。文档提交 SHA 与提交后 Git 状态见阶段 3 交付回复。
+
+### 阶段 5 验证记录
+
+- 修改前直接相关基线：`uv run pytest -q tests/unit/test_task_domain.py tests/unit/test_task_domain_more.py tests/unit/test_task_creation_domain.py tests/unit/test_provider_profiles.py tests/unit/test_mock_provider.py tests/unit/test_retry_and_assets.py tests/unit/test_reference_object_keys.py tests/unit/test_reference_image_inspector.py`，结果 `53 passed`。基线全仓 Ruff 为 `0006_compatibility_constraints.py:45-47` 三条既有 E501；阶段 5 没有修改该迁移文件。
+- 真实服务在独立 Compose project `museflow-stage5-20260924`、隔离命名 volume/network 和私有 bucket `museflow-stage5-test` 中运行；PostgreSQL `127.0.0.1:55439`、Redis `127.0.0.1:56379`、MinIO `127.0.0.1:59000`。PostgreSQL、Redis、MinIO、Scheduler、generation Worker 和 maintenance Worker 镜像构建/启动健康。仅将 `MUSEFLOW_TEST_DATABASE_URL` 与应用 URL 指向该项目；没有启动或迁移默认 `museflow` 项目数据库。
+- Compose `migrate` 从空隔离卷成功运行至 `0007_reference_operation_leases`；`uv run alembic current` 返回该 head，`uv run alembic check` 为 `No new upgrade operations detected`，因此无新 schema migration。
+- 隔离数据库的图生图执行错误矩阵：`uv run pytest -q tests/integration/test_retry_recovery.py -k 'image_'` 得到 `7 passed, 12 deselected`，覆盖素材存储暂时不可用同 attempt 恢复、Provider 创建前 transient 开启新 attempt、已有 remote ID 运行失败后恢复同 attempt且 create 次数不增加、Provider 永久失败，以及素材对象缺失/篡改 fail closed。
+- 真实图生图主链路：设置隔离 DB/MinIO 配置与 `MUSEFLOW_RUN_REAL_IMAGE_TO_IMAGE_TEST=1`，运行 `uv run pytest -q tests/integration/test_real_compose_image_to_image_e2e.py`，结果 `1 passed`。验证 API 上传 READY 素材、任务+outbox、Scheduler→Redis→Compose Worker、实际 MinIO 字节读取、冻结 SHA、attempt/phase、私有不可变结果、详情/历史和参考/结果下载。Windows 测试宿主与 Linux Worker 的 PNG 压缩字节可不同，因此对两端解码像素摘要作生成内容比对；数据库结果 SHA 另与 MinIO 原始对象字节 SHA 严格核对。
+- 其余真实隔离服务回归分别通过：Compose 文生图→私有 MinIO→短期签名过期 `1 passed`；真实 Redis/Scheduler/Worker 长任务 heartbeat `1 passed`；参考素材 MinIO 私有上传/完整读取/短期访问 `1 passed`；maintenance Scheduler→独立 maintenance Worker `1 passed`。完整后端命令同时启用 `MUSEFLOW_RUN_REAL_MINIO_TEST=1` 和 `MUSEFLOW_RUN_RESULT_PUBLICATION_INTEGRATION=1`，覆盖真实 MinIO 结果对象与 PostgreSQL fencing。
+- 完整后端：设置隔离测试 DB、Redis、MinIO 并启用上列两个 MinIO/result publication 门禁，`uv run pytest -q` 结果 `195 passed, 5 skipped, 2 warnings`。5 个 Compose 门禁随后均单独实际运行通过（文生图 Compose、Redis Worker、maintenance Worker、MinIO 参考上传、图生图 Compose）；2 条警告是现有 Starlette/httpx 和 AnyIO 弃用警告，不是阶段 5 改动导致。
+- 代码检查：`uv run ruff check src tests` 通过；`uv run ruff check src tests migrations` 仍仅报告 `0006_compatibility_constraints.py:45-47` 三条已确认基线错误。`uv run pyright` 为 `0 errors, 0 warnings, 0 informations`；`uv run python -m compileall -q src tests migrations` 通过；`docker compose ... config --quiet`、`git diff --check` 通过。
+- OpenAPI/前端：`npm run generate:api` 更新 OpenAPI 与 `schema.generated.ts`；`npm run typecheck`、`npm run lint`、`npm run test`（`17 passed`）和 `npm run build` 均通过。未实现或运行阶段 7 的完整前端 Compose UI E2E。
+- 清理：仅对新建 project `museflow-stage5-20260924` 执行 `docker compose down -v --remove-orphans`，核实其容器、网络和三个隔离 volume 均已删除；`.scratch/stage5-verification/` 已移除。默认 `museflow` project、volume 与数据库未连接、迁移或删除。
+- 实现提交：`89553113faec3708d1292859c794a49cd9a12755`（`feat: 实现图生图领域与 Mock 全链路`）。阶段 5 文档提交 SHA 和最终清理后的工作区状态由本阶段交付记录更新。
 
 ## 22. 参考资料
 
