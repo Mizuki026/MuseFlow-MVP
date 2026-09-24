@@ -5,10 +5,22 @@ from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import delete, select
 
 from museflow.api.app import create_app
-from museflow.db.models import GenerationTaskModel, OutboxMessageModel, TaskEventModel
+from museflow.assets import StoredAsset
+from museflow.db.models import (
+    GenerationTaskModel,
+    OutboxMessageModel,
+    ResultAssetModel,
+    TaskEventModel,
+)
 from museflow.db.session import create_session_factory
+from museflow.providers import MockProvider
+from museflow.tasks.application import CreateTask
+from museflow.tasks.domain import CreateTaskRequest
+from museflow.tasks.execution import ExecuteGenerationAttempt
+from museflow.tasks.execution_models import GenerationAttemptModel
 
 
 @pytest.fixture()
@@ -150,3 +162,74 @@ def test_liveness_and_readiness(client: TestClient) -> None:
 
     assert ready.status_code == 200
     assert ready.json()["status"] == "ready"
+
+
+def test_historical_result_asset_still_downloads_from_its_saved_object_key() -> None:
+    database_url = os.environ.get("MUSEFLOW_TEST_DATABASE_URL")
+    if not database_url:
+        pytest.skip("MUSEFLOW_TEST_DATABASE_URL is required for API tests")
+    session_factory = create_session_factory(database_url)
+    task_id = CreateTask(session_factory).execute(
+        CreateTaskRequest(prompt="historical result download"), f"history-download-{uuid4()}"
+    ).task.id
+
+    class RecordingAssetStore:
+        def __init__(self) -> None:
+            self.download_keys: list[str] = []
+
+        def put_result(self, **_: object) -> StoredAsset:
+            raise AssertionError("the historical download route must not write an object")
+
+        def presigned_download(
+            self, object_key: str, *, expires_seconds: int = 300
+        ) -> str:
+            self.download_keys.append(object_key)
+            return f"https://objects.example/{object_key}?expires={expires_seconds}"
+
+        def check_ready(self) -> None:
+            return None
+
+    asset_store = RecordingAssetStore()
+    legacy_key: str | None = None
+    try:
+        assert ExecuteGenerationAttempt(session_factory, MockProvider()).execute(task_id).succeeded
+        with session_factory.begin() as session:
+            attempt = session.scalar(
+                select(GenerationAttemptModel).where(GenerationAttemptModel.task_id == task_id)
+            )
+            assert attempt is not None
+            legacy_key = f"results/{task_id}/{attempt.id}/0.png"
+            session.add(
+                ResultAssetModel(
+                    id=uuid4(),
+                    task_id=task_id,
+                    attempt_id=attempt.id,
+                    role="RESULT",
+                    object_key=legacy_key,
+                    content_type="image/png",
+                    size_bytes=42,
+                    sha256="a" * 64,
+                    created_at=attempt.started_at,
+                )
+            )
+
+        client = TestClient(create_app(session_factory=session_factory, asset_store=asset_store))
+        detail = client.get(f"/api/v1/tasks/{task_id}")
+        assert detail.status_code == 200
+        download_url = detail.json()["result"]["download_url"]
+        assert download_url.endswith(f"/api/v1/assets/{detail.json()['result']['id']}/download")
+
+        download = client.get(download_url, follow_redirects=False)
+        assert download.status_code == 307
+        assert legacy_key is not None
+        assert asset_store.download_keys == [legacy_key]
+        assert legacy_key in download.headers["location"]
+    finally:
+        with session_factory.begin() as session:
+            session.execute(
+                delete(OutboxMessageModel).where(OutboxMessageModel.aggregate_id == task_id)
+            )
+            session.execute(delete(TaskEventModel).where(TaskEventModel.task_id == task_id))
+            task = session.get(GenerationTaskModel, task_id)
+            if task is not None:
+                session.delete(task)

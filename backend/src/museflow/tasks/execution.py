@@ -10,7 +10,12 @@ from uuid import UUID, uuid4
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
-from museflow.assets import ResultAssetStore, StoredAsset
+from museflow.assets import (
+    ResultAssetStore,
+    StoredAsset,
+    candidate_object_key,
+    result_identity,
+)
 from museflow.db.models import GenerationTaskModel, ResultAssetModel, TaskEventModel
 from museflow.providers import (
     GenerationProvider,
@@ -20,6 +25,12 @@ from museflow.providers import (
 )
 from museflow.tasks.domain import RetryPolicy, TaskStatus
 from museflow.tasks.execution_models import GenerationAttemptModel
+from museflow.tasks.result_publication import (
+    PublicationDecision,
+    ResultPointer,
+    ResultPublicationStatus,
+    decide_result_publication,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +52,8 @@ class ExecutionOutcome:
     attempt_id: UUID | None
     executed: bool
     succeeded: bool
+    publication_status: ResultPublicationStatus | None = None
+    candidate_persisted: bool = False
 
 
 class ExecuteGenerationAttempt:
@@ -104,26 +117,50 @@ class ExecuteGenerationAttempt:
             )
             raise
 
-        # A transport/storage crash is deliberately allowed to escape. The lease and
-        # the stable attempt key make the next delivery retry the same attempt.
-        committed = self._succeed(claim, result, stored)
-        return ExecutionOutcome(task_id, claim.attempt_id, executed=True, succeeded=committed)
+        # Candidate upload precedes the fenced DB transaction. A DB error escapes
+        # without marking success; lease recovery retries this same logical attempt.
+        decision = self._succeed(claim, result, stored)
+        succeeded = decision in {
+            PublicationDecision.PUBLISHED,
+            PublicationDecision.ALREADY_PUBLISHED,
+        }
+        publication_status = None
+        if stored is not None:
+            publication_status = ResultPublicationStatus(decision.value)
+        return ExecutionOutcome(
+            task_id,
+            claim.attempt_id,
+            executed=True,
+            succeeded=succeeded,
+            publication_status=publication_status,
+            candidate_persisted=stored is not None,
+        )
 
     def _store_result(self, claim: ExecutionClaim, result: GenerationResult) -> StoredAsset | None:
         if self._asset_store is None:
             return None
-        return self._asset_store.put_result(
+        identity = result_identity(result.content, result.content_type)
+        expected = StoredAsset(
+            object_key=candidate_object_key(claim.task_id, claim.attempt_id, identity),
+            content_type=identity.content_type,
+            size_bytes=identity.size_bytes,
+            sha256=identity.sha256,
+        )
+        stored = self._asset_store.put_result(
             task_id=claim.task_id,
             attempt_id=claim.attempt_id,
             content=result.content,
-            content_type=result.content_type,
+            content_type=identity.content_type,
         )
+        if stored != expected:
+            raise RuntimeError("result asset store returned metadata for a different candidate")
+        return stored
 
     def _mark_result_persisting(self, claim: ExecutionClaim) -> bool:
         now = self._clock()
         with self._session_factory.begin() as session:
-            attempt = session.get(GenerationAttemptModel, claim.attempt_id, with_for_update=True)
             task = session.get(GenerationTaskModel, claim.task_id, with_for_update=True)
+            attempt = session.get(GenerationAttemptModel, claim.attempt_id, with_for_update=True)
             if (
                 attempt is None
                 or task is None
@@ -139,8 +176,8 @@ class ExecuteGenerationAttempt:
         error_code = "RESULT_STORAGE_ERROR"
         error_message = "result storage failed; the current attempt will be recovered"
         with self._session_factory.begin() as session:
-            attempt = session.get(GenerationAttemptModel, claim.attempt_id, with_for_update=True)
             task = session.get(GenerationTaskModel, claim.task_id, with_for_update=True)
+            attempt = session.get(GenerationAttemptModel, claim.attempt_id, with_for_update=True)
             if (
                 attempt is None
                 or task is None
@@ -261,28 +298,65 @@ class ExecuteGenerationAttempt:
 
     def _succeed(
         self, claim: ExecutionClaim, result: GenerationResult, stored: StoredAsset | None
-    ) -> bool:
-        now = self._clock()
+    ) -> PublicationDecision:
         with self._session_factory.begin() as session:
+            task = session.get(GenerationTaskModel, claim.task_id, with_for_update=True)
             attempt = session.scalar(
                 select(GenerationAttemptModel)
                 .where(GenerationAttemptModel.id == claim.attempt_id)
                 .with_for_update()
             )
-            task = session.get(GenerationTaskModel, claim.task_id, with_for_update=True)
-            if (
-                attempt is None
-                or task is None
-                or not self._claim_is_current(attempt, task, claim, now)
-            ):
-                return False
-            if (
-                stored is not None
-                and session.scalar(
-                    select(ResultAssetModel).where(ResultAssetModel.attempt_id == claim.attempt_id)
+            if task is None or attempt is None:
+                return PublicationDecision.OWNERSHIP_LOST
+
+            # The task lock serializes publishers before the unique task/role constraint.
+            existing_model = session.scalar(
+                select(ResultAssetModel)
+                .where(
+                    ResultAssetModel.task_id == claim.task_id,
+                    ResultAssetModel.role == "RESULT",
                 )
-                is None
-            ):
+                .with_for_update()
+            )
+            now = self._clock()
+            if stored is None:
+                if existing_model is not None:
+                    return PublicationDecision.CONFLICTING_RESULT
+                if not self._claim_is_current(attempt, task, claim, now):
+                    return PublicationDecision.OWNERSHIP_LOST
+                decision = PublicationDecision.PUBLISH
+            else:
+                candidate = ResultPointer(
+                    attempt_id=claim.attempt_id,
+                    object_key=stored.object_key,
+                    content_type=stored.content_type,
+                    size_bytes=stored.size_bytes,
+                    sha256=stored.sha256,
+                )
+                existing = (
+                    ResultPointer(
+                        attempt_id=existing_model.attempt_id,
+                        object_key=existing_model.object_key,
+                        content_type=existing_model.content_type,
+                        size_bytes=existing_model.size_bytes,
+                        sha256=existing_model.sha256,
+                    )
+                    if existing_model is not None
+                    else None
+                )
+                decision = decide_result_publication(
+                    token_matches=attempt.execution_token == claim.execution_token,
+                    lease_active=attempt.lease_expires_at > now,
+                    attempt_status=attempt.status,
+                    task_status=task.status,
+                    claim_attempt_id=claim.attempt_id,
+                    existing=existing,
+                    candidate=candidate,
+                )
+                if decision is PublicationDecision.ALREADY_PUBLISHED:
+                    return decision
+                if decision is not PublicationDecision.PUBLISH:
+                    return decision
                 session.add(
                     ResultAssetModel(
                         id=uuid4(),
@@ -299,7 +373,7 @@ class ExecuteGenerationAttempt:
             attempt.status = "SUCCEEDED"
             attempt.phase = "RESULT_PERSISTED"
             attempt.provider_request_id = result.provider_request_id
-            attempt.result_digest = result.result_digest
+            attempt.result_digest = stored.sha256 if stored is not None else result.result_digest
             attempt.result_metadata = asdict(stored) if stored is not None else result.metadata
             attempt.finished_at = now
             task.status = TaskStatus.SUCCEEDED.value
@@ -315,23 +389,23 @@ class ExecuteGenerationAttempt:
                     event_type="TASK_SUCCEEDED",
                     payload={
                         "attempt_id": str(claim.attempt_id),
-                        "result_digest": result.result_digest,
+                        "result_digest": attempt.result_digest,
                     },
                     created_at=now,
                 )
             )
-            return True
+        return PublicationDecision.PUBLISHED
 
     def _fail(self, claim: ExecutionClaim, error: Exception) -> bool:
         now = self._clock()
         code, retryable = self._error_details(error)
         with self._session_factory.begin() as session:
+            task = session.get(GenerationTaskModel, claim.task_id, with_for_update=True)
             attempt = session.scalar(
                 select(GenerationAttemptModel)
                 .where(GenerationAttemptModel.id == claim.attempt_id)
                 .with_for_update()
             )
-            task = session.get(GenerationTaskModel, claim.task_id, with_for_update=True)
             if (
                 attempt is None
                 or task is None

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import os
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
@@ -8,8 +7,13 @@ from uuid import UUID, uuid4
 import pytest
 from sqlalchemy import delete, select
 
-from museflow.assets import StoredAsset
-from museflow.db.models import GenerationTaskModel, OutboxMessageModel, TaskEventModel
+from museflow.assets import StoredAsset, candidate_object_key, result_identity
+from museflow.db.models import (
+    GenerationTaskModel,
+    OutboxMessageModel,
+    ResultAssetModel,
+    TaskEventModel,
+)
 from museflow.db.session import create_session_factory
 from museflow.providers import MockProvider, PermanentProviderError, TransientProviderError
 from museflow.tasks.application import CreateTask, ManualRetryNotAllowedError
@@ -17,6 +21,7 @@ from museflow.tasks.domain import CreateTaskRequest, TaskPolicy, TaskStatus
 from museflow.tasks.execution import ExecuteGenerationAttempt
 from museflow.tasks.execution_models import GenerationAttemptModel
 from museflow.tasks.recovery import RecoverExpiredLeases, ScheduleDueRetries
+from museflow.tasks.result_publication import PublicationDecision
 
 
 @pytest.fixture()
@@ -122,8 +127,8 @@ def test_expired_worker_token_cannot_commit_after_takeover(isolated_session_fact
             request_key=old_claim.provider_request_key,
             remote_request_id=None,
         )
-        assert execute._succeed(old_claim, result, None) is False
-        assert execute._succeed(new_claim, result, None) is True
+        assert execute._succeed(old_claim, result, None) is PublicationDecision.OWNERSHIP_LOST
+        assert execute._succeed(new_claim, result, None) is PublicationDecision.PUBLISHED
         with isolated_session_factory() as session:
             task = session.get(GenerationTaskModel, task_id)
         assert task is not None and task.status == TaskStatus.SUCCEEDED.value
@@ -199,11 +204,12 @@ class FailingResultStore:
         self.calls += 1
         if self.failures is None or self.calls <= self.failures:
             raise RuntimeError("simulated object store outage")
+        identity = result_identity(content, content_type)
         return StoredAsset(
-            object_key=f"results/{task_id}/{attempt_id}/0.png",
-            content_type=content_type,
-            size_bytes=len(content),
-            sha256=hashlib.sha256(content).hexdigest(),
+            object_key=candidate_object_key(task_id, attempt_id, identity),
+            content_type=identity.content_type,
+            size_bytes=identity.size_bytes,
+            sha256=identity.sha256,
         )
 
     def presigned_download(self, object_key: str, *, expires_seconds: int = 300) -> str:
@@ -234,6 +240,11 @@ def test_result_storage_failure_reuses_same_attempt_and_recovers(
             attempt = session.scalar(
                 select(GenerationAttemptModel).where(GenerationAttemptModel.task_id == task_id)
             )
+            assets = list(
+                session.scalars(
+                    select(ResultAssetModel).where(ResultAssetModel.task_id == task_id)
+                )
+            )
             events = list(
                 session.scalars(
                     select(TaskEventModel)
@@ -248,6 +259,7 @@ def test_result_storage_failure_reuses_same_attempt_and_recovers(
         assert attempt.status == "RUNNING"
         assert attempt.phase == "RESULT_PERSISTING"
         assert attempt.error_code == "RESULT_STORAGE_ERROR"
+        assert assets == []
         assert {event.event_type for event in events} == {
             "TASK_QUEUED",
             "ATTEMPT_STARTED",
@@ -328,11 +340,12 @@ class CrashAfterUploadStore:
 
     def put_result(self, *, task_id, attempt_id, content: bytes, content_type: str) -> StoredAsset:
         self.puts += 1
+        identity = result_identity(content, content_type)
         stored = StoredAsset(
-            object_key=f"results/{task_id}/{attempt_id}/0.png",
-            content_type=content_type,
-            size_bytes=len(content),
-            sha256=hashlib.sha256(content).hexdigest(),
+            object_key=candidate_object_key(task_id, attempt_id, identity),
+            content_type=identity.content_type,
+            size_bytes=identity.size_bytes,
+            sha256=identity.sha256,
         )
         self.written_keys.add(stored.object_key)
         if self.puts == 1:
@@ -407,7 +420,7 @@ def test_worker_crash_after_provider_acceptance_reuses_remote_request_id(
         _cleanup(isolated_session_factory, task_id)
 
 
-def test_worker_crash_after_object_upload_reuses_deterministic_asset(
+def test_worker_crash_after_object_upload_reuses_same_content_candidate(
     isolated_session_factory,
 ) -> None:
     clock = _current_clock()

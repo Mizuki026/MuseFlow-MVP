@@ -23,11 +23,19 @@ DEFAULT_RESULT_HOSTS = frozenset(
         "dashscope-a717.oss-accelerate.aliyuncs.com",
     }
 )
+_RESULT_EXTENSIONS = {"image/png": "png", "image/jpeg": "jpg", "image/webp": "webp"}
 
 
 @dataclass(frozen=True, slots=True)
 class StoredAsset:
     object_key: str
+    content_type: str
+    size_bytes: int
+    sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class ResultIdentity:
     content_type: str
     size_bytes: int
     sha256: str
@@ -79,19 +87,43 @@ class ResultAssetStore(Protocol):
 
 
 def validate_result(content: bytes, content_type: str) -> tuple[str, int, str]:
-    allowed = {
-        "image/png": (b"\x89PNG\r\n\x1a\n", "png"),
-        "image/jpeg": (b"\xff\xd8\xff", "jpg"),
-        "image/webp": (b"RIFF", "webp"),
-    }
-    if content_type not in allowed:
+    identity = result_identity(content, content_type)
+    return identity.content_type, identity.size_bytes, identity.sha256
+
+
+def result_identity(content: bytes, claimed_content_type: str) -> ResultIdentity:
+    """Validate result bytes and derive media identity from their file signature."""
+    if claimed_content_type not in _RESULT_EXTENSIONS:
         raise ValueError("unsupported result content type")
     if len(content) > MAX_RESULT_BYTES:
         raise ValueError("result is larger than the configured maximum")
-    magic, extension = allowed[content_type]
-    if not content.startswith(magic) or (extension == "webp" and content[8:12] != b"WEBP"):
+
+    if content.startswith(b"\x89PNG\r\n\x1a\n"):
+        detected_content_type = "image/png"
+    elif content.startswith(b"\xff\xd8\xff"):
+        detected_content_type = "image/jpeg"
+    elif content.startswith(b"RIFF") and content[8:12] == b"WEBP":
+        detected_content_type = "image/webp"
+    else:
+        raise ValueError("result file header is not a supported image format")
+
+    if claimed_content_type != detected_content_type:
         raise ValueError("result file header does not match content type")
-    return content_type, len(content), hashlib.sha256(content).hexdigest()
+    return ResultIdentity(
+        content_type=detected_content_type,
+        size_bytes=len(content),
+        sha256=hashlib.sha256(content).hexdigest(),
+    )
+
+
+def candidate_object_key(task_id: UUID, attempt_id: UUID, identity: ResultIdentity) -> str:
+    """Build the immutable candidate key from a verified content identity."""
+    extension = _RESULT_EXTENSIONS.get(identity.content_type)
+    if extension is None or len(identity.sha256) != 64 or any(
+        character not in "0123456789abcdef" for character in identity.sha256
+    ):
+        raise ValueError("result identity is invalid")
+    return f"results/{task_id}/{attempt_id}/candidates/{identity.sha256}.{extension}"
 
 
 def _image_dimensions(content: bytes, content_type: str) -> tuple[int, int]:
@@ -287,11 +319,6 @@ class SecureResultDownloader:
         _assert_safe_host(host, self._resolve_host)
 
 
-def deterministic_object_key(task_id: UUID, attempt_id: UUID, content_type: str) -> str:
-    suffix = {"image/png": "png", "image/jpeg": "jpg", "image/webp": "webp"}[content_type]
-    return f"results/{task_id}/{attempt_id}/0.{suffix}"
-
-
 class MinioResultAssetStore:
     def __init__(
         self,
@@ -333,17 +360,17 @@ class MinioResultAssetStore:
         content: bytes,
         content_type: str,
     ) -> StoredAsset:
-        content_type, size, sha256 = validate_result(content, content_type)
-        key = deterministic_object_key(task_id, attempt_id, content_type)
+        identity = result_identity(content, content_type)
+        key = candidate_object_key(task_id, attempt_id, identity)
         self._client.put_object(
             self._bucket,
             key,
             io.BytesIO(content),
-            size,
-            content_type=content_type,
-            metadata={"x-amz-meta-sha256": sha256},
+            identity.size_bytes,
+            content_type=identity.content_type,
+            metadata={"x-amz-meta-sha256": identity.sha256},
         )
-        return StoredAsset(key, content_type, size, sha256)
+        return StoredAsset(key, identity.content_type, identity.size_bytes, identity.sha256)
 
     def presigned_download(self, object_key: str, *, expires_seconds: int = 300) -> str:
         return self._signer.presigned_get_object(
