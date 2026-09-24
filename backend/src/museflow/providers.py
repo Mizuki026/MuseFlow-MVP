@@ -285,6 +285,8 @@ class MockProvider:
                 and int(request_key.rsplit(":attempt:", 1)[-1]) == 1
             ):
                 raise TransientProviderError("PROVIDER_UNAVAILABLE", "mock provider is recovering")
+            if self._scenario is MockScenario.RATE_LIMITED:
+                raise TransientProviderError("PROVIDER_RATE_LIMITED", "mock provider rate limited")
             if lease_guard is not None:
                 lease_guard.require_ownership()
             with self._counter_lock:
@@ -300,8 +302,6 @@ class MockProvider:
                 self.recovery_calls += 1
         if on_phase is not None:
             on_phase(AttemptPhase.PROVIDER_RUNNING)
-        if self._scenario is MockScenario.RATE_LIMITED:
-            raise TransientProviderError("PROVIDER_RATE_LIMITED", "mock provider rate limited")
         if self._scenario is MockScenario.TIMEOUT:
             raise TransientProviderError("PROVIDER_TIMEOUT", "mock provider timed out")
         if self._scenario is MockScenario.PERMANENT_FAILURE:

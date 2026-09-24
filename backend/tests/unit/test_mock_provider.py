@@ -15,6 +15,7 @@ from museflow.providers import (
     MockProvider,
     PermanentProviderError,
     ProviderGenerationRequest,
+    TransientProviderError,
 )
 from museflow.tasks.domain import GenerationType, VerifiedReferenceImage
 
@@ -139,3 +140,20 @@ def test_image_to_image_remote_request_recovery_does_not_create_again() -> None:
     assert remote_ids == ["mock-recoverable"]
     assert provider.create_calls == 1
     assert provider.recovery_calls == 1
+
+
+def test_rate_limit_scenario_fails_before_creating_a_remote_request() -> None:
+    provider = MockProvider(scenario="rate_limited")
+    remote_ids: list[str] = []
+
+    with pytest.raises(TransientProviderError) as error:
+        provider.generate(
+            GenerationRequest(prompt="rate-limited request", size_preset=DASHSCOPE_SIZE),
+            request_key="rate-limited:attempt:1",
+            remote_request_id=None,
+            on_remote_request_id=remote_ids.append,
+        )
+
+    assert error.value.code == "PROVIDER_RATE_LIMITED"
+    assert provider.create_calls == 0
+    assert remote_ids == []
