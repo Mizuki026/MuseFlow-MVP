@@ -1,7 +1,7 @@
 # MuseFlow 最终版本技术方案
 
 - 版本：v0.2
-- 状态：分阶段实施中（阶段 2 完成）
+- 状态：分阶段实施中（阶段 3 完成，阶段 4 待开始）
 - 更新日期：2026-09-24
 - 对应产品文档：[MuseFlow 最终产品设计文档](../product/museflow-product-design.md)
 - 基线方案：[MuseFlow MVP 技术方案](./museflow-mvp-technical-design.md)
@@ -333,7 +333,7 @@ results/{task_id}/{attempt_id}/candidates/{sha256}.{ext}
 ### 8.4 迁移顺序与兼容性
 
 1. 新建 `reference_assets`，为 `result_assets` 增加 nullable 宽高，为任务增加 nullable 新字段。
-2. 将既有任务回填为 `TEXT_TO_IMAGE`，并回填当前默认 Provider profile、模型和能力版本。
+2. 将既有任务回填为 `TEXT_TO_IMAGE`；无法从历史记录证明的 Provider 信息使用明确的 legacy 未冻结标记，不从当前环境推断。
 3. 部署兼容读写代码；新前端显式发送生成类型。
 4. 验证含真实 MVP 数据的数据库升级、旧任务查询和旧下载路径。
 5. 对已完成回填且能在数据库内证明的字段增加非空和 CHECK；历史结果宽高保持兼容 nullable，由管理命令独立回填。
@@ -692,6 +692,18 @@ Playwright 使用 `MockProvider` 覆盖：
 
 验收：既有文生图测试全绿，含真实 MVP 数据的数据库升级通过，MinIO 离线不阻断 Alembic。
 
+阶段 3 实施记录：
+
+- 新增 `0005_expand_compatibility_schema`（parent：`0004_demo_execution_profiles`）和 `0006_compatibility_constraints`（parent：`0005_expand_compatibility_schema`）。迁移只使用 PostgreSQL/Alembic，不导入应用服务、不连接 MinIO/Redis/Provider，也不读取环境变量决定回填值；两个 downgrade 都明确拒绝可能有损的回退。
+- 新增独立 `reference_assets` 表，包含上传幂等键、请求指纹、状态、对象键、文件元数据、生命周期时间和错误字段。状态 CHECK 固定为 `STAGING`、`READY`、`FAILED`、`DELETE_PENDING`、`DELETED`；幂等键和对象键各有唯一约束，并添加 `(status, created_at)` 与 `(status, delete_pending_at)` 索引。此阶段没有上传、MinIO 写入、生命周期用例、TTL 或 maintenance queue。
+- `result_assets.width`、`height` 均 nullable；二者必须同时为空或同时为正数。既有结果不会被伪造尺寸，查询和下载兼容空尺寸；本阶段不实现历史宽高回填命令，后续由独立、可重入的数据收尾流程处理。新结果路径从经格式识别的实际图片字节读取宽高并持久化，不信任 Provider 的尺寸声明。
+- `generation_tasks` 新增 `generation_type`、参考素材 ID/SHA、Provider profile/provider/model/capability 字段和 `policy_snapshot`。迁移保留现有任务、attempt、结果、事件、outbox、重试链及对象键；既有任务确定性回填为 `TEXT_TO_IMAGE`，参考字段为空。新任务保存冻结的 Provider 与策略快照。生成类型、参考字段配对和 JSON 策略快照对象均由 CHECK 约束，reference 外键使用 `ON DELETE RESTRICT`。
+- 阶段 2 的历史任务没有按任务保存 Provider profile/model/capability，不能证明过去使用的精确模型。迁移统一写入 `provider_profile=legacy-unfrozen-v1`、`provider_name/model_name/capability_version=legacy-unknown`，并将策略快照标记为 `{"version":"legacy-unfrozen-v1","frozen":false}`。该值表达“历史事实未知”，不是实际 Provider；Worker 不会回退到当前环境 Provider，历史任务若被重新执行会得到稳定的 profile 不可用结果。新任务由 API 与 Worker 共用的代码 registry 选取并核对冻结 profile。
+- 旧 `/api/v1` 请求省略生成类型时仍规范化为 `TEXT_TO_IMAGE`；显式传入文生图与省略字段保留相同幂等指纹。当前阶段的 API 对图生图和文生图参考素材字段稳定拒绝，不会创建半成品任务。历史 cursor 与数据库保存的结果对象键下载路径保持不变；历史详情允许结果宽高为空。
+- 测试先通过 Alembic 从空库升级、从 `0004` 历史 schema 插入带有任务/attempt/结果/事件/outbox/重试关系的 MVP 形态数据后升级，并验证重复升级、回填、约束、旧任务 API/cursor/下载和历史空宽高。迁移测试移除 MinIO、Redis 和 Provider 配置后执行；没有升级或清空仓库默认 Docker volume。
+- 空库、历史 fixture、约束迁移测试 `3 passed`；真实 Redis/Worker 长任务测试单独 `1 passed`。启用 MinIO、结果发布和 Compose Worker→私有 MinIO 下载端到端门禁后，完整后端套件 `130 passed, 1 skipped, 2 warnings`。Ruff、Pyright、compileall、Alembic check、Compose 配置和 diff 检查通过。完整命令与隔离方式见第 21 节。
+- 代码提交：`27427fb`（`feat: 增加兼容任务快照与参考素材迁移`）。阶段 3 文档提交和最终工作区状态见交付报告。
+
 ### 阶段 4：参考素材纵向切片
 
 - 加入 `python-multipart` 和 Pillow。
@@ -781,8 +793,9 @@ Playwright 使用 `MockProvider` 覆盖：
 - 创建、详情、历史三个正式前端页面及 OpenAPI 类型生成。
 - MVP 单元、集成、故障恢复和端到端测试。
 - 阶段 2：执行 lease heartbeat、稳定 attempt phase、ownership/deadline fail-closed 和同 attempt 恢复语义。
+- 阶段 3：兼容 schema、历史任务确定性 backfill、Provider/policy 快照与旧 API/数据读取验证。
 
-阶段 0 已完成并得出 `CONDITIONAL GO`；阶段 1 的不可变候选和数据库权威结果 fencing 已完成；阶段 2 的 heartbeat、稳定 phase、失败责任域和恢复边界已实现并通过验证。下一步可以进入阶段 3 兼容数据迁移。阶段 3/4 不应等待正式 Provider 接入；正式接入真实结果下载前仍必须实现符合阶段 0 报告要求的 `SafeArtifactFetcher`，不得绕过 DNS 连接保护和完整图片解码条件。
+阶段 0 已完成并得出 `CONDITIONAL GO`；阶段 1 的不可变候选和数据库权威结果 fencing 已完成；阶段 2 的 heartbeat、稳定 phase、失败责任域和恢复边界已实现并通过验证；阶段 3 的兼容 schema、确定性 backfill 与旧 API/数据读取验证已完成。下一步可以进入阶段 4 参考素材纵向切片。阶段 4 不必等待正式 Provider 接入；正式接入真实结果下载前仍必须实现符合阶段 0 报告要求的 `SafeArtifactFetcher`，不得绕过 DNS 连接保护和完整图片解码条件。
 
 产品与架构决策已经在 2026-09-24 的审查中收敛。每次真实图生图请求仍需要单独确认账号、地域、费用、请求参数和单次授权；文档结论本身不构成付费调用授权。
 
@@ -800,7 +813,7 @@ Playwright 使用 `MockProvider` 覆盖：
 - `docker compose config --quiet`：通过；`git diff --check`：通过。
 - 实现提交：`e469a21dd624d3f774236fc326634be82db40105`（`fix: 使用不可变候选保护权威结果`）。文档同步提交 SHA 与最终工作区状态由交付报告记录。
 
-正式 Provider Adapter 仍受阶段 0 `SafeArtifactFetcher` 部署前置条件约束；阶段 1 窗口未实现该 fetcher、lease heartbeat、参考素材或图生图 schema。阶段 2 已完成 heartbeat 与执行语义，参考素材和图生图 schema 仍留给后续阶段。
+正式 Provider Adapter 仍受阶段 0 `SafeArtifactFetcher` 部署前置条件约束；阶段 3 只建立参考素材 schema 和未来图生图可表达的任务字段，本阶段没有实现上传、参考图片校验/存储、图生图创建或正式 Adapter。历史结果宽高仍 nullable，独立回填命令属于后续数据收尾项。
 
 ### 阶段 2 验证记录
 
@@ -814,6 +827,17 @@ Playwright 使用 `MockProvider` 覆盖：
 - 部署与差异检查：`docker compose config --quiet` 通过；从仓库根目录执行 `git diff --check` 通过（仅有 Git 的 LF/CRLF 提示）。
 - 验证期间发现测试库同时被临时 Scheduler/Worker 使用，以及 phase 事件与成功事件同时间戳时排序不稳定；停止两项进程并将断言改为验证事件集合后，全量运行通过。最终全量运行时 Redis Worker/Scheduler 已停止。
 - 阶段 2 实现提交：`490427b`（`feat: 增加执行租约续租与恢复语义`）；LeaseGuard 单元测试补充提交：`1c45d1f`（`test: 补充 LeaseGuard 单元覆盖`）。
+
+### 阶段 3 验证记录
+
+- 修改前工作区为 `main`，相对 `origin/main` ahead 10，工作区干净；基线 Alembic head 为 `0004_demo_execution_profiles`。基线在隔离 PostgreSQL 执行 `alembic upgrade head`、`alembic current`、`alembic check`，确认 head 为 `0004` 且无新操作；全量后端基线为 `109 passed, 6 skipped, 2 warnings`。
+- `uv run --directory backend pytest -q tests/integration/test_compatibility_migration.py`：`3 passed, 2 warnings`。测试实际执行 Alembic revision 链：空库从 base 到 head、在 `0004` schema 写入代表旧 MVP 的两条任务（含重试关系）、attempt、权威结果、event 和 outbox 后升级到 head；断言行数/关联/对象键保留、旧字段确定性回填、历史宽高为空、重复 upgrade 稳定、旧 API 详情/cursor/下载仍可用，并验证 CHECK、FK、RESTRICT、状态与唯一约束。测试调用 Alembic 时移除 MinIO、Redis、Provider 配置。
+- `uv run --directory backend pytest -q tests/integration/test_real_redis_worker.py`（隔离 Compose PostgreSQL/Redis/Worker，lease 3 秒、heartbeat 0.5 秒）：`1 passed`；任务运行超过原 lease 后仍由同一 attempt 完成。
+- 启用 `MUSEFLOW_RUN_REAL_MINIO_TEST=1`、`MUSEFLOW_RUN_RESULT_PUBLICATION_INTEGRATION=1`、`MUSEFLOW_RUN_REAL_COMPOSE_E2E_TEST=1`，使用独立 Compose 项目的 PostgreSQL/Redis/MinIO/Worker 运行 `uv run --directory backend pytest -q`：`130 passed, 1 skipped, 2 warnings`。包含真实结果写入/发布、图片尺寸、MinIO 私有对象签名下载以及 Worker→MinIO Compose 链路；单独运行的真实 Redis Worker 测试已通过。两个警告来自现有 Starlette/httpx 与 AnyIO 弃用提示。
+- `uv run --directory backend ruff check src tests`：通过；`uv run --directory backend pyright`：`0 errors, 0 warnings, 0 informations`；`uv run --directory backend python -m compileall -q src tests`：通过。
+- 使用隔离 Compose PostgreSQL 执行 `uv run --directory backend alembic check`：`No new upgrade operations detected`。`docker compose config --quiet`、`git diff --check` 通过。以独立项目名运行完整 `docker compose up -d --build` 后，再单独执行 `MUSEFLOW_RUN_REAL_COMPOSE_E2E_TEST=1 uv run --directory backend pytest -q tests/integration/test_real_compose_mock_e2e.py`，结果 `1 passed in 9.10s`；覆盖任务投递、Compose Worker、私有 MinIO 写入及签名下载/过期。该测试由 host-side 应用用例和 dispatcher 驱动，不覆盖 HTTP API/前端交互；API 兼容由独立 API 测试覆盖。测试项目使用独立命名卷，down 时未传 `-v`，默认 `museflow` 卷未连接或清空。
+- 初始服务检查发现仓库默认 Compose 数据库未监听 `127.0.0.1:55432`。因此没有对仓库默认数据卷应用迁移；历史兼容性通过真实 PostgreSQL 上从 `0004` 迁移的隔离 MVP 形态 fixture 验证。fixture 不是默认卷的生产备份，部署前仍应在目标数据库备份后执行迁移并核对数据量。
+- 代码提交：`27427fb`（`feat: 增加兼容任务快照与参考素材迁移`）。文档提交 SHA 与提交后 Git 状态见阶段 3 交付回复。
 
 ## 22. 参考资料
 
