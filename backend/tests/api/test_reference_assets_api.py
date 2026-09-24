@@ -133,12 +133,17 @@ def test_upload_is_idempotent_and_download_uses_verified_stable_path(api) -> Non
 
         metadata = client.get(f"/api/v1/assets/{asset_id}")
         downloaded = client.get(f"/api/v1/assets/{asset_id}/download")
+        signed_access = client.get(
+            f"/api/v1/assets/{asset_id}/access", follow_redirects=False
+        )
         assert metadata.status_code == 200
         assert metadata.json()["sha256"] == hashlib.sha256(png).hexdigest()
         assert downloaded.status_code == 200
         assert downloaded.content == png
         assert downloaded.headers["content-type"] == "image/png"
         assert downloaded.headers["cache-control"] == "private, no-store"
+        assert signed_access.status_code == 307
+        assert signed_access.headers["location"].endswith("?expires=300")
         assert client.get("/api/v1/assets/missing").status_code == 422
     finally:
         _cleanup(factory, blob_store, asset_ids)

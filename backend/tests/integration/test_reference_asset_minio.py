@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import io
 import os
+from urllib.parse import urlsplit, urlunsplit
 from uuid import UUID
 
 import httpx
@@ -67,6 +68,15 @@ def test_reference_asset_upload_is_private_and_verified_through_api() -> None:
         assert downloaded.status_code == 200
         assert downloaded.content == content
         assert downloaded.headers["content-type"] == "image/png"
+        access = client.get(f"/api/v1/assets/{asset_id}/access", follow_redirects=False)
+        assert access.status_code == 307
+        signed_url = access.headers["location"]
+        signed = httpx.get(signed_url, timeout=10)
+        assert signed.status_code == 200
+        assert signed.content == content
+        parsed = urlsplit(signed_url)
+        unsigned_url = urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
+        assert httpx.get(unsigned_url, timeout=10).status_code == 403
         assert "object_key" not in body
     finally:
         if object_key is not None:
