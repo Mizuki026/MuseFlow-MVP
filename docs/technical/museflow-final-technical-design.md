@@ -714,14 +714,14 @@ Playwright 使用 `MockProvider` 覆盖：
 
 阶段 4 实施记录：
 
-- `POST /api/v1/assets` 接收单个 `file` multipart part 和必需的 `Idempotency-Key`；首次成功返回 201，同 key 同一图片指纹重放返回 200 和 `idempotency_replayed=true`，不同内容返回 409。`GET /api/v1/assets/{asset_id}` 返回稳定业务元数据；`GET /api/v1/assets/{asset_id}/download` 对 READY 参考素材返回经 SHA 与图片元数据重新验证的私有 bytes，同时按原契约保留历史 `result_assets` 的 307 签名下载；`/access` 仅接受数据库中的 asset ID 并产生最多 300 秒的短期访问入口。
+- `POST /api/v1/assets` 接收单个 `file` multipart part 和必需的 `Idempotency-Key`；首次成功返回 201，同 key 同一图片指纹重放返回 200 和 `idempotency_replayed=true`，不同内容返回 409。`GET /api/v1/assets/{asset_id}` 返回稳定业务元数据；`GET /api/v1/assets/{asset_id}/download` 对 READY 参考素材返回经 SHA 与图片元数据重新验证的私有 bytes，同时按原契约保留历史 `result_assets` 的 307 签名下载；`/access` 仅接受数据库中的 asset ID 并产生最多 300 秒的短期访问入口，真实 MinIO 集成验证了签名 URL 可读、去签名参数后匿名请求返回 403。
 - 大小限制为三层：ASGI 原始 multipart body 累计最多 6,500,000 bytes（64 KiB 内存后 spool 到临时文件，校验真实 body，Content-Length 仅作提前拒绝）；应用以 64 KiB chunk 写受控临时文件并增量计数/hash，图片文件最多 6,000,000 bytes；Pillow 解码限制边长 240–2,048、总像素最多 4,194,304、比例 1:4–4:1、单帧、RGB 且无 alpha。支持 PNG/JPEG/WebP；文件签名、声明 MIME 和解码格式必须相符，`verify()` 后重新打开并完整 `load()`，解压炸弹 warning/error、损坏、截断、CMYK/灰度、动画和超限内容稳定拒绝。
 - 对象键由素材 UUID、实际 SHA-256 和真实格式集中生成：`references/{asset_id}/{sha256}.{ext}`，不含上传文件名或客户端扩展名。上传先创建带 operation lease 的 `STAGING`，再在事务外写私有 MinIO、核对对象 stat/字节/hash/完整解码，最后使用 lease token 条件推进 `READY`；外部存储故障保留可重试状态。幂等指纹覆盖摘要、实际 MIME、宽高、大小、帧数和色彩模式；已终态素材不会被重放复活。
 - 每 300 秒 PostgreSQL outbox 生成维护意图；Scheduler 先独立执行 retry、lease 回收和核心 `EXECUTE_TASK` outbox，再尝试只访问 PostgreSQL/Redis 的 maintenance dispatch。Celery `generation` 与 `maintenance` 队列分路由，Compose 的 `maintenance-worker` 有独立并发配置 `MUSEFLOW_MAINTENANCE_CONCURRENCY`（默认 1）和 90/120 秒软/硬超时；MinIO stat/get/delete 仅在 maintenance Worker 或上传/访问请求中执行，不在 Scheduler 中执行。
 - `STAGING` 满 1 小时后由可重入维护任务核验对象：匹配则 READY，缺失/不匹配则 FAILED 并记录稳定错误，暂时 MinIO 故障释放为延迟重试。`python -m museflow.reference_assets report` 输出只读报告；`delete-unreferenced` 默认 dry-run，至少 24 小时、批量最多 100 条，只有显式 `--execute` 才通过 `FOR UPDATE SKIP LOCKED`、引用复查和 `READY → DELETE_PENDING` 领取删除；MinIO delete 在 Worker 中执行，失败保持 DELETE_PENDING 重试，完成后进入 DELETED。没有自动 TTL 删除或用户删除 API。
 - 后续任务创建可在同一 PostgreSQL 事务调用 `lock_ready_for_reference()`，锁定 READY 行后插入任务；删除领取使用同一行锁协议并二次查询引用，FK `ON DELETE RESTRICT` 继续生效。API 当前没有用户级认证，仍只适用于受信网络边界；不能把 asset ID 或短期签名入口视为用户授权。
 - 真实 PostgreSQL、MinIO、Redis、Scheduler 和 maintenance Worker 路径均实际验证；具体命令、结果、全量测试门禁和非阻断的历史 Ruff 失败见第 21 节。前端文件选择、预览与完整 UI Compose E2E 按范围留到阶段 7。
-- 实现提交：`06e9ccb`（图片完整校验）、`a68addd`（上传与稳定访问）、`0842fad`（维护队列与显式清理）、`dd5cb9a`（Pyright 严格模式下的格式类型收窄）。文档提交 SHA 由本阶段交付报告记录。
+- 实现提交：`06e9ccb`（图片完整校验）、`a68addd`（上传与稳定访问）、`0842fad`（维护队列与显式清理）、`dd5cb9a`（Pyright 严格模式下的格式类型收窄）、`27c42d2`（短期签名访问验证）。文档提交 SHA 由本阶段交付报告记录。
 
 ### 阶段 5：图生图领域与 Mock 链路
 
@@ -831,11 +831,11 @@ Playwright 使用 `MockProvider` 覆盖：
 ### 阶段 4 验证记录
 
 - 修改前直接相关基线：以隔离 PostgreSQL 执行参考素材前置的 retry、结果安全边界和 attempt 语义测试，`24 passed`。真实服务使用独立 Compose project `museflow-stage4`、独立命名 volume/network、PostgreSQL `127.0.0.1:55439`、Redis `127.0.0.1:56379`、MinIO `127.0.0.1:59000` 和私有 bucket `museflow-stage4-test`；没有连接或迁移默认数据库，也没有真实 Provider 请求。
-- 全量后端：`uv run --directory backend pytest -q`，隔离 DB 环境下 `169 passed, 8 skipped, 2 warnings`。8 个 gated 测试随后全部分别实际运行：Compose Mock→MinIO E2E `1 passed`、真实 Redis/Scheduler/Worker heartbeat `1 passed`、reference MinIO API 私有上传 `1 passed, 2 warnings`、真实 maintenance Scheduler/Worker 恢复 `1 passed`、真实 MinIO 结果对象私有签名 `1 passed`、PostgreSQL/MinIO result publication fencing `3 passed, 2 warnings`。这些路径只使用 Mock/fixture，不调用收费 Provider。运行全量套件期间先停止真实 Scheduler/Worker，避免后台任务竞争同一测试库；两项真实 Worker 测试另行开启对应服务执行。
+- 全量后端：`uv run --directory backend pytest -q`，隔离 DB 环境下 `169 passed, 8 skipped, 2 warnings`。8 个 gated 测试随后全部分别实际运行：Compose Mock→MinIO E2E `1 passed`、真实 Redis/Scheduler/Worker heartbeat `1 passed`、reference MinIO API 私有上传和稳定下载/短期签名访问 `1 passed, 2 warnings`、真实 maintenance Scheduler/Worker 恢复 `1 passed`、真实 MinIO 结果对象私有签名 `1 passed`、PostgreSQL/MinIO result publication fencing `3 passed, 2 warnings`。这些路径只使用 Mock/fixture，不调用收费 Provider。运行全量套件期间先停止真实 Scheduler/Worker，避免后台任务竞争同一测试库；两项真实 Worker 测试另行开启对应服务执行。
 - 直接相关参考素材集成：上传 API、图片完整校验、原始请求体与流式限制、对象键、队列隔离、Scheduler 故障隔离和 PostgreSQL 生命周期并发套件 `44 passed, 2 warnings`；修复历史结果下载兼容、阶段 3 revision 断言和测试时钟隔离后，旧结果下载、完整阶段 3 migration/API 回归、maintenance dispatch 与 retry 回归 `16 passed, 2 warnings`。真实 MinIO 上传/下载集成再次运行 `1 passed, 2 warnings`；真实 maintenance Worker 再次运行 `1 passed`。
 - 静态与构建：Pyright `0 errors, 0 warnings, 0 informations`；`python -m compileall -q src tests migrations` 通过；`alembic check` 返回 `No new upgrade operations detected`；`docker compose ... config --quiet` 通过；包含 API、Scheduler、generation Worker 和 maintenance Worker 的 Compose 镜像构建及启动成功；前端 `npm run typecheck` 与 `npm run build` 通过（没有改动前端文件）。阶段 4 所有代码/测试文件的 Ruff 检查通过。全仓 `ruff check` 报告阶段 3 已提交 `0006_compatibility_constraints.py:45-47` 的 3 条超 100 列错误；该文件与阶段 4 基线 `7d052d9` 完全相同，未为清理无关历史格式而改动。
 - `git diff --check` 在最终文档提交前执行；隔离 Compose 服务和 `.scratch/stage4/` 验证文件在交付前清理。未运行完整前端 Compose UI E2E（属于阶段 7）。
-- 阶段 4 实现提交：`06e9ccb`（校验）、`a68addd`（上传/访问）、`0842fad`（维护/清理）、`dd5cb9a`（严格类型收窄）；文档提交和提交后工作区状态见交付报告。
+- 阶段 4 实现提交：`06e9ccb`（校验）、`a68addd`（上传/访问）、`0842fad`（维护/清理）、`dd5cb9a`（严格类型收窄）、`27c42d2`（短期签名访问验证）；文档提交和提交后工作区状态见交付报告。
 
 ### 阶段 2 验证记录
 
