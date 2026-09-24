@@ -4,7 +4,7 @@ MuseFlow 是一个面向本机和受信网络的图像生成工作流演示项�
 
 ## 一条命令启动
 
-需要 Docker Desktop 与 Docker Compose。首次构建还需要 Docker Hub 和 Quay 镜像仓库可达。
+需要 Docker Desktop 与 Docker Compose。首次构建还需要 Docker Hub、GitHub Releases 和 Go 模块代理可达；MinIO 服务端从固定的上游版本编译，首次构建可能较慢。
 
 在仓库根目录执行：
 

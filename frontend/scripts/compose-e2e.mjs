@@ -191,8 +191,8 @@ try {
       ], { cwd: repoDir, env: gateEnv })
 
       if (failureCode === 0) {
-        console.log('Stopping only the generation worker so test-owned workers have exclusive queue access.')
-        failureCode = await run(docker, [...composePrefix, 'stop', 'worker'], { cwd: repoDir, env })
+        console.log('Stopping the generation worker and scheduler so test-owned workers and clocks have exclusive control.')
+        failureCode = await run(docker, [...composePrefix, 'stop', 'worker', 'scheduler'], { cwd: repoDir, env })
       }
       if (failureCode === 0) {
         gateEnv.MUSEFLOW_RUN_SIMULATED_DASHSCOPE_E2E = '1'

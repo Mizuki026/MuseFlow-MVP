@@ -77,6 +77,9 @@ jobs:
       - name: Validate Compose configuration
         run: docker compose config --quiet
 
+      - name: Build storage images from pinned upstream releases
+        run: docker compose build minio minio-init
+
       - name: Run isolated full-stack and backend integration checks
         working-directory: frontend
         run: npm run test:e2e:compose -- --backend-check --full-backend-gates
