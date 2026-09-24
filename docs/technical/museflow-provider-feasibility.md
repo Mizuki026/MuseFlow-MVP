@@ -554,3 +554,42 @@
 5. 上线前复核模型目录、地域/价格、alias 行为和当前额度；若 API 字段或模型行为发生实质变化，更新 capability version 并重新评估门禁。
 
 如产品必须支持无状态未知窗口自动恢复、未授权重复请求也绝不可能产生重复费用、任意上传尺寸或 Provider 保证模型固定版本，则本 Conditional GO 不适用，应改选具有对应合同保障的 Provider，或收缩产品承诺。
+
+## 19. 第 6 个窗口：正式 Adapter 与非收费端到端验收（2026-09-24）
+
+本节记录阶段 6 实施及新验证，**不改写**第 18 节阶段 0 的探针、授权和真实调用历史。第 18.4–18.5 节对“生产 SafeArtifactFetcher 尚未实现”的表述是阶段 0 当时状态；阶段 6 已完成下述实现，但真实 Provider 系统 E2E 仍待新的单次授权。
+
+### 19.1 官方协议复核
+
+重新核对 [Wan 图像生成 API 文档](https://help.aliyun.com/en/model-studio/wan-image-generation-api-reference)、[Wan2.6 Image 模型与计费](https://help.aliyun.com/zh/model-studio/wan2-6-image) 和[限流建议](https://help.aliyun.com/en/model-studio/rate-limiting-best-practices)。文档仍支持阶段 0 冻结的 profile：北京 Workspace 异步创建 endpoint、`X-DashScope-Async: enable`、查询 `/api/v1/tasks/{task_id}`、`PENDING/RUNNING/SUCCEEDED/FAILED` 及终态 `CANCELED/UNKNOWN`；轮询仍建议按约 10 秒间隔。返回 URL 在示例中出现过北京 OSS host，但官方没有承诺结果 host 永久固定，因此代码只允许阶段 0 脱敏证据实际命中的一个精确 host，不因官方示例扩展 allowlist，重定向设为 0。
+
+北京 `wan2.6-image` 单张输出标价仍为 ¥0.20。阶段 6 没有发出真实 Provider 请求，因此没有真实任务 ID、输出图或账单记录；此处价格只用于后续单次授权上限说明，不代表发生扣费。
+
+### 19.2 实现与当前安全边界
+
+- `backend/src/museflow/dashscope_image_adapter.py` 实现独立 `DashScopeWan26ImageAdapter`；profile 为 `dashscope-wan2.6-image-cn-beijing-edit`，model `wan2.6-image`，capability version `official-doc-snapshot-2026-09-24`。Workspace origin 必须是单层北京 MaaS HTTPS host，端口 443，拒绝 userinfo、路径、query、fragment 和相似后缀 host。
+- 输入再次核对实际 PNG/JPEG/WebP MIME 与 bytes；限制为单张、RGB、单帧、无 alpha、≤6,000,000 bytes、每边 240–2,048 px、≤4,194,304 pixels、宽高比 1:4–4:1。Data URL 使用真实 MIME。JSON 请求固定模型字段与 `enable_interleave=false`、`n=1`、`size=1K`、`prompt_extend=false`、`watermark=false`，序列化后 body ≤8,100,000 bytes。
+- 每 attempt 最多一个 POST；HTTPX 不跟随 redirect、不读取代理环境、不自动重试。远端 task ID 解析后立即进入 `on_remote_request_id`；已知 ID 只 GET 原 task。超时、响应读取失败、task ID 保存失败和保守处理的 5xx 会记录为 submission 状态未知并阻止自动创建重试。轮询检查 lease/deadline，10 秒间隔、最多 60 次、总超时 600 秒；只接受冻结状态集合及一个输出图 URL。
+- `backend/src/museflow/safe_artifacts.py` 通过窄 httpcore transport 将已验证并选定的公网 DNS 地址直接用于 socket 连接，同时 URL、HTTP Host 和 TLS SNI 保留规范化后的原始 host。每个请求/redirect hop 独立建立 pool（无连接复用、无重试）；TLS context 要求主机名校验及 `CERT_REQUIRED`。Resolver 返回的所有地址都必须为公网地址；混合公网/非公网、私网、回环、保留、文档测试网段、IPv4-mapped unsafe IPv6 和 zone ID 均拒绝。Resolver 与 transport 注入仅用于测试，不全局 monkeypatch DNS。
+- 通用 fetcher 对每跳重新校验 HTTPS、端口、userinfo、精确 allowlist、DNS/IP 和循环；协议 profile 设 `max_redirects=0`。流式读取前检查 `Content-Length`，实际累计字节始终受 20 MiB 限制，禁止压缩响应，deadline/ownership 在读取时持续检查，失败路径关闭 stream/client。输出只接受 PNG/RGB/单帧/无 alpha，最大边 1,440、总像素≤1,440²；验证 Content-Type、PNG 签名、Pillow `verify()` 和重新打开后的完整 `load()`，计算实际 SHA-256。Result URL 不进入数据库或 API 响应，Adapter 不接触 ORM/MinIO。
+- 稳定错误码区分配置、请求/内容拒绝、认证/权限、配额和可退避的 RateQuota/BurstRate、Provider 5xx/网络、创建未知、轮询协议、结果 URL、安全 DNS、下载大小/MIME/解码与 deadline；429 allocation/account quota 是永久账号阻断，不映射为普通可退避限流。
+
+### 19.3 非收费验证记录
+
+| 验证 | 结果 |
+| --- | --- |
+| 修改前直接相关基线 | `39 passed, 1 skipped`；Starlette/httpx 与 AnyIO 两条既有弃用警告。 |
+| SafeArtifactFetcher、Adapter、profile 测试 | `105 passed`；全 unit suite `214 passed`（ownership/deadline、严格结果结构、多个选择项、控制字符 URL 与空白凭据用例均纳入）。 |
+| 独立模拟 Provider 全链路 | `1 passed`：隔离 PostgreSQL、Redis、MinIO；正式 Scheduler iteration；Celery Worker test runner；API 上传/任务创建/outbox、单次模拟 POST、远端 ID、轮询、受控安全下载、不可变候选、DB/MinIO SHA 与短期签名访问。Provider API 和 ArtifactFetcher transport 使用受控模拟，无网络 Provider POST。 |
+| 阶段 5 完整 Compose 文生图及 Mock 图生图 | `2 passed`；独立 Compose 的 PostgreSQL、Redis、Scheduler、generation Worker、MinIO 均实际运行。 |
+| PostgreSQL/MinIO 发布 fencing、MinIO 对象及参考上传集成 | `5 passed`。 |
+| 短 lease 的真实 Redis Worker / heartbeat | `1 passed`；实际 Worker 运行超过 2 秒 lease；因该历史探针主动派发 outbox，测试期间暂停 Scheduler 避免其抢先消费。maintenance Scheduler→Worker `1 passed`，并由模拟 E2E 单独覆盖正式调度迭代。 |
+| 完整后端测试 | 隔离服务下 `292 passed, 9 skipped, 2 warnings`；模拟 DashScope E2E 门禁已启用，其余 9 个 gated 测试按对应服务设置另行运行，详见最终技术方案阶段 6 验证记录。 |
+| Ruff / Pyright / compileall | 本阶段涉及文件 Ruff 全绿；Pyright `0 errors, 0 warnings, 0 informations`；compileall 通过。全仓 Ruff 仍只有 `migrations/versions/0006_compatibility_constraints.py:45-47` 的 3 条已知历史 E501。 |
+| Alembic / OpenAPI / 前端 / Compose | 隔离 PostgreSQL head `0007_reference_operation_leases`，`alembic check` 无新操作；OpenAPI 与已提交 JSON 对象一致；前端 typecheck、lint、17 个 Vitest、build 通过；Compose config 与 backend API/Scheduler/worker/maintenance-worker 镜像构建通过。 |
+
+所有容器和卷使用独立 Compose project `museflow-stage6-simulation` 及独立命名 volume/network/bucket；默认 Compose 项目/数据卷未连接、迁移或删除。完整 pytest 执行时暂停后台消费者，避免与手动执行型集成测试争抢 outbox。2 条弃用警告与本阶段无关。
+
+### 19.4 阶段 6 状态与门禁
+
+**阶段 6：有条件完成。** SafeArtifactFetcher、正式 Adapter/profile、模拟 Provider 的真实基础设施端到端和无收费回归已实现并提交，代码提交为 `d9e1809fe14bad85e3d19c13c82b3c494a4096cf`。未取得新的真实调用授权：真实 POST 数 `0`，真实任务/状态轨迹/数据库与 MinIO 输出 SHA/匿名访问/短期访问证据均未验证，实际账单没有本窗口真实调用记录。下一步必须先完成提示词中列出的脱敏授权前清单，再等待用户逐次明确授权；未授权不得发送创建请求。模型 alias 稳定性和 8,100,000-byte request guard 仍分别属于 Provider 未承诺与本地限制；外部 exactly-once 仍不保证。
