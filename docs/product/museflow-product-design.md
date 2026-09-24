@@ -307,28 +307,28 @@ MVP 是历史交付基线，不代表其中所有实现都无需加固。最终�
 
 ### 12.1 验收追踪基线
 
-下表定义每项最终验收必须提供的证据入口。实施完成前状态均视为“未证明”；各阶段交付时填写实际测试文件、记录路径、运行日期和 commit。
+下表定义每项最终验收必须提供的证据入口。各项实际状态、测试文件、运行日期、命令和对应 commit 汇总在[最终发布验收追踪表](../technical/museflow-final-acceptance.md)；没有可复查证据的条目仍标为未证明。
 
-| ID | 验收主题 | 必需证据 |
-| --- | --- | --- |
-| P-01 | 一条 Compose 命令启动完整前后端 | Compose config、镜像构建、健康检查与干净环境演示记录 |
-| P-02 | 正式前端完成两类任务 | Playwright Mock 流程与真实 Provider 受控记录 |
-| P-03 | 参考图片安全校验 | 单元测试、原始 multipart API 测试与 MinIO 集成测试 |
-| P-04 | 上传幂等 | API 201/200/409 测试与 PostgreSQL 并发测试 |
-| P-05 | 两类任务复用任务生命周期 | Worker/Scheduler 集成测试与架构检查 |
-| P-06 | Mock 故障场景 | 确定性 Provider 契约测试与 Playwright 演示 |
-| P-07 | 唯一权威结果 | 新旧 Worker 不同字节交错写入测试与对象 checksum 核对 |
-| P-08 | 故障后有界收敛 | Redis、MinIO、Worker 和进程重启故障注入测试 |
-| P-09 | 创建与删除并发安全 | PostgreSQL 锁协议和外键集成测试 |
-| P-10 | 素材恢复与显式清理 | maintenance queue 集成测试、dry-run 与管理命令记录 |
-| P-11 | 私有存储和无认证边界 | MinIO 匿名 403、短期入口测试与 README 人工检查 |
-| P-12 | Provider profile 冻结 | registry 单元测试、启动校验和 API/Worker 漂移测试 |
-| P-13 | 真实 Provider E2E | 单次授权、脱敏请求轨迹、结果摘要和对应 commit |
-| P-14 | MVP 兼容迁移 | 含历史数据的 Alembic 升级、旧 API 和旧下载回归测试 |
-| P-15 | 发布阻断竞态 | 第 15 项列举场景的自动化测试集合 |
-| P-16 | 工程质量门 | 测试、lint、类型检查、迁移检查、构建和 Compose 命令输出 |
-| P-17 | README 可复现性 | 干净环境人工演示记录和已知限制检查 |
-| P-18 | 对外声明一致 | README、简历和产品声明逐项核对记录 |
+| ID | 验收主题 | 必需证据 | 当前状态与证据 |
+| --- | --- | --- | --- |
+| P-01 | 一条 Compose 命令启动完整前后端 | Compose config、镜像构建、健康检查与干净环境演示记录 | [验收记录](../technical/museflow-final-acceptance.md#p-01) |
+| P-02 | 正式前端完成两类任务 | Playwright Mock 流程与真实 Provider 受控记录 | [验收记录](../technical/museflow-final-acceptance.md#p-02) |
+| P-03 | 参考图片安全校验 | 单元测试、原始 multipart API 测试与 MinIO 集成测试 | [验收记录](../technical/museflow-final-acceptance.md#p-03) |
+| P-04 | 上传幂等 | API 201/200/409 测试与 PostgreSQL 并发测试 | [验收记录](../technical/museflow-final-acceptance.md#p-04) |
+| P-05 | 两类任务复用任务生命周期 | Worker/Scheduler 集成测试与架构检查 | [验收记录](../technical/museflow-final-acceptance.md#p-05) |
+| P-06 | Mock 故障场景 | 确定性 Provider 契约测试与 Playwright 演示 | [验收记录](../technical/museflow-final-acceptance.md#p-06) |
+| P-07 | 唯一权威结果 | 新旧 Worker 不同字节交错写入测试与对象 checksum 核对 | [验收记录](../technical/museflow-final-acceptance.md#p-07) |
+| P-08 | 故障后有界收敛 | Redis、MinIO、Worker 和进程重启故障注入测试 | [验收记录](../technical/museflow-final-acceptance.md#p-08) |
+| P-09 | 创建与删除并发安全 | PostgreSQL 锁协议和外键集成测试 | [验收记录](../technical/museflow-final-acceptance.md#p-09) |
+| P-10 | 素材恢复与显式清理 | maintenance queue 集成测试、dry-run 与管理命令记录 | [验收记录](../technical/museflow-final-acceptance.md#p-10) |
+| P-11 | 私有存储和无认证边界 | MinIO 匿名 403、短期入口测试与 README 人工检查 | [验收记录](../technical/museflow-final-acceptance.md#p-11) |
+| P-12 | Provider profile 冻结 | registry 单元测试、启动校验和 API/Worker 漂移测试 | [验收记录](../technical/museflow-final-acceptance.md#p-12) |
+| P-13 | 真实 Provider E2E | 单次授权、脱敏请求轨迹、结果摘要和对应 commit | [验收记录](../technical/museflow-final-acceptance.md#p-13) |
+| P-14 | MVP 兼容迁移 | 含历史数据的 Alembic 升级、旧 API 和旧下载回归测试 | [验收记录](../technical/museflow-final-acceptance.md#p-14) |
+| P-15 | 发布阻断竞态 | 第 15 项列举场景的自动化测试集合 | [验收记录](../technical/museflow-final-acceptance.md#p-15) |
+| P-16 | 工程质量门 | 测试、lint、类型检查、迁移检查、构建和 Compose 命令输出 | [验收记录](../technical/museflow-final-acceptance.md#p-16) |
+| P-17 | README 可复现性 | 干净环境人工演示记录和已知限制检查 | [验收记录](../technical/museflow-final-acceptance.md#p-17) |
+| P-18 | 对外声明一致 | README、简历和产品声明逐项核对记录 | [验收记录](../technical/museflow-final-acceptance.md#p-18) |
 
 性能数据只有在决定公开时才进入追踪表；没有公开吞吐量、并发量或 P95 时，不要求为了完成版本而运行 Locust。
 

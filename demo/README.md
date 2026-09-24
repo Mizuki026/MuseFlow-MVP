@@ -2,6 +2,23 @@
 
 验证问题：创建任务、查看状态与失败重试是否顺手？哪一种页面结构适合 MuseFlow？
 
+## 正式产品 MockProvider 演示
+
+本目录仍是可丢弃的独立静态原型；正式产品演示使用仓库根目录的 Docker Compose 与 `MockProvider`，不是这个内存原型。
+
+1. 安装 Docker Desktop、Docker Compose、Node.js 24 和 `uv`，在仓库根目录运行 `docker compose up --build`。
+2. 打开 `http://127.0.0.1:5173/tasks/new`，确认 Web、API、Scheduler、generation Worker、maintenance Worker、PostgreSQL、Redis 和 MinIO 均健康。
+3. 输入文生图提示词和尺寸，提交后在详情页观察 `QUEUED`、`RUNNING` 到终态的变化。
+4. 刷新详情页，确认状态、attempt、时间线和结果仍从后端恢复。
+5. 回到新建页上传 PNG、JPEG 或 WebP 参考图，等待素材校验通过并出现预览。
+6. 选择图生图，提交提示词和参考图，检查详情页显示生成类型、冻结 Provider profile 和结果。
+7. 在任务历史按类型、状态和提示词筛选，并用分页加载更多任务。
+8. 从成功任务复用参数，或从失败任务执行手动重试，检查新任务与原任务的关联。
+9. 运行 `npm run test:e2e:compose -- --backend-check --full-backend-gates`，Playwright 会在隔离 Compose 项目中覆盖成功、确定性失败、幂等重放、重试、浏览器错误监控、服务集成门禁和重启持久化。
+10. 检查命令末尾的 Playwright / pytest 汇总；脚本只清理它创建的 Compose project 和 volumes。全程使用 MockProvider，不需要凭证、不产生 Provider 费用；reference maintenance 隔离和清理覆盖 `tests/integration/test_real_reference_maintenance_worker.py` 与 `tests/integration/test_reference_asset_minio.py`。
+
+失败注入走显式启用的 Demo API 入口，并继续经正式任务创建用例、PostgreSQL outbox、Scheduler、Redis 和 Worker 生命周期；它不直接写数据库，也不替代正式 UI 的成功流程。默认 Compose 不启用 Demo 入口。
+
 ## 启动
 
 在仓库根目录运行：
