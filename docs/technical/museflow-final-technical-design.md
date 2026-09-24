@@ -1,7 +1,7 @@
 # MuseFlow 最终版本技术方案
 
 - 版本：v0.2
-- 状态：阶段 6 已完成（单次真实 Provider E2E 通过；阶段 7 待启动）
+- 状态：阶段 7 已完成（正式前端、完整 Mock Compose 与回归验收通过）
 - 更新日期：2026-09-24
 - 对应产品文档：[MuseFlow 最终产品设计文档](../product/museflow-product-design.md)
 - 基线方案：[MuseFlow MVP 技术方案](./museflow-mvp-technical-design.md)
@@ -749,11 +749,13 @@ Playwright 使用 `MockProvider` 覆盖：
 
 ### 阶段 7：前端与 Compose
 
-- 实现生成类型选择、幂等上传、预览、详情和历史筛选。
-- 重新生成 OpenAPI 类型并补齐 Vitest 与 Playwright。
-- 使用多阶段前端镜像和静态 Web 容器加入 Compose。
+- 已实现生成类型选择、参考图片本地预览与幂等上传、服务端校验反馈、任务详情/attempt/错误时间线/重试链，以及类型和状态组合筛选、cursor 分页与已加载提示词搜索。
+- 前端只持久化恢复创建意图所需的提示词、生成类型、幂等键与 READY 素材 ID；原始图片和对象 URL 不写入浏览器持久化。下载通过稳定 MuseFlow 路径，不向浏览器暴露 MinIO 对象键或签名 URL。
+- 从既有 OpenAPI 生成的类型驱动图生图请求，Vitest 覆盖创建幂等、素材选择状态、恢复、过滤和详情边界；Playwright 通过生产静态 Web 容器和真实 API/私有 MinIO 验证主要 UI 流程。
+- 增加 Node 多阶段构建、Nginx 静态 Web 与 `/api/` 反向代理；Compose 统一启动 migrate、bucket 初始化、Web、API、Scheduler、generation Worker、maintenance Worker、PostgreSQL、Redis 与 MinIO。所有宿主机端口默认仅绑定 loopback，默认固定 MockProvider。
+- 增加显式真实 Provider Compose override；真实 Provider 不会由默认启动或测试流程调用。
 
-验收：一条 Compose 命令启动完整 UI；正式前端完成文生图和图生图，MVP 流程无回归。
+验收结果：完整隔离 Compose 栈启动成功；Playwright `6 passed`；完整后端回归 `292 passed, 10 skipped`；隔离数据库迁移到 `0007_reference_operation_leases` 且 `alembic check` 无新操作；Web 容器重启后数据库任务与 MinIO 结果仍可读取。详见第 21 节。
 
 ### 阶段 8：证据化收尾
 
@@ -810,13 +812,14 @@ Playwright 使用 `MockProvider` 覆盖：
 - PostgreSQL outbox、Scheduler、Redis、Celery、attempt、lease 和 fencing。
 - 真实文生图 Provider、`MockProvider`、安全结果下载和私有 MinIO。
 - 创建、详情、历史三个正式前端页面及 OpenAPI 类型生成。
+- 阶段 7：完成正式文生图/图生图前端、生产静态 Web 容器、统一 `/api` 代理、完整 Mock Compose E2E 与重启持久化验证。
 - MVP 单元、集成、故障恢复和端到端测试。
 - 阶段 2：执行 lease heartbeat、稳定 attempt phase、ownership/deadline fail-closed 和同 attempt 恢复语义。
 - 阶段 3：兼容 schema、历史任务确定性 backfill、Provider/policy 快照与旧 API/数据读取验证。
 
 阶段 0 已完成并得出 `CONDITIONAL GO`；阶段 1 的不可变候选和数据库权威结果 fencing 已完成；阶段 2 的 heartbeat、稳定 phase、失败责任域和恢复边界已实现并通过验证；阶段 3 的兼容 schema、确定性 backfill 与旧 API/数据读取验证已完成。
 
-阶段 4 已完成参考图片上传、私有存储、稳定访问、恢复和显式维护删除；阶段 5 已完成图生图领域、冻结参考输入、Mock 执行、手动重试、历史筛选及真实后端链路验收。阶段 6 已实现正式 `wan2.6-image` Adapter 和 `SafeArtifactFetcher`，模拟 Provider 全链路、单次真实 Provider E2E 及阶段 1 至阶段 5 回归均通过。历史结果宽高仍 nullable，回填继续由独立数据收尾流程处理。默认 Compose 数据库尚未应用迁移；本窗口只迁移并清理了独立测试项目。任何实际部署都必须先备份目标数据库，再升级到 `0007_reference_operation_leases` 并核对迁移后数据量。阶段 7 的前端生成类型选择、上传 UI 与完整 UI Compose E2E 仍留后续。
+阶段 4 已完成参考图片上传、私有存储、稳定访问、恢复和显式维护删除；阶段 5 已完成图生图领域、冻结参考输入、Mock 执行、手动重试、历史筛选及真实后端链路验收。阶段 6 已实现正式 `wan2.6-image` Adapter 和 `SafeArtifactFetcher`，模拟 Provider 全链路、单次真实 Provider E2E 及阶段 1 至阶段 5 回归均通过。阶段 7 已完成前端与静态 Compose 交付和 Mock 全栈 E2E。历史结果宽高仍 nullable，回填继续由独立数据收尾流程处理。默认 Compose 数据库未应用迁移；本阶段只迁移并清理隔离测试项目。任何实际部署都必须先备份目标数据库，再升级到 `0007_reference_operation_leases` 并核对迁移后数据量。
 
 产品与架构决策已经在 2026-09-24 的审查中收敛。每次真实图生图请求仍需要单独确认账号、地域、费用、请求参数和单次授权；文档结论本身不构成付费调用授权。
 
@@ -893,6 +896,16 @@ Playwright 使用 `MockProvider` 覆盖：
 - 后端完整套件：使用隔离 PostgreSQL/Redis/MinIO，启用模拟 DashScope E2E 门禁并停止后台 Scheduler/Worker，避免与直接执行型测试争抢 outbox；`uv run pytest -q` 得到 `292 passed, 9 skipped, 2 warnings`。其余 9 个按服务或单独门禁运行的测试已分别运行并记录在本节。2 条既有警告来自 Starlette/httpx 与 AnyIO 弃用提示。
 - 迁移与类型/静态检查：隔离 PostgreSQL `alembic current` 为 `0007_reference_operation_leases`；`uv run alembic check` 返回 `No new upgrade operations detected`；`uv run pyright` 为 `0 errors, 0 warnings, 0 informations`；`uv run python -m compileall -q src tests` 通过。`docker compose -p museflow-stage6-simulation config --quiet` 通过；Compose API、Scheduler、worker、maintenance-worker 镜像均构建成功。
 - 全仓 Ruff `uv run ruff check .` 仍只报告已记录的 `migrations/versions/0006_compatibility_constraints.py:45-47` 三条历史 E501；全部本阶段源码与测试的 Ruff 检查通过。前端 `npm run typecheck`、`npm run lint`、`npm test`（`17 passed`）和 `npm run build` 通过；OpenAPI 结构与已提交 `frontend/openapi.json` 比较一致，无 API schema 更新。
+
+### 阶段 7 验证记录
+
+- 修改前工作区干净；前端基线 `npm run typecheck`、`npm run lint`、Vitest（`17 passed`）和 `npm run build` 均通过。默认 Compose 项目及其卷未启动、迁移或清理；阶段验收仅使用脚本创建的独立 project、隔离端口与命名卷，并在结束时移除该隔离项目。
+- 前端 `npm run check:api-generated` 通过，OpenAPI 与提交的生成类型无差异；最终 `npm run typecheck`、`npm run lint`、`npm test -- --reporter=dot`（`19 passed`）和 `npm run build` 通过。
+- 后端 `uv run ruff check src tests`、`uv run pyright`（`0 errors, 0 warnings, 0 informations`）及 `uv run python -m compileall -q src tests migrations` 通过。全仓 `uv run ruff check .` 仍报告阶段 3 迁移 `migrations/versions/0006_compatibility_constraints.py:45-47` 的 3 条既有 E501；该迁移未修改。MockProvider 限流模拟在远端请求创建前失败，以遵守“已有关联 remote ID 的 attempt 不自动重发”语义；对应单元测试通过。
+- `docker compose config --quiet` 通过；隔离 Compose 前端、API、Scheduler、generation Worker、maintenance Worker、PostgreSQL、Redis 和 MinIO 全部健康。迁移升级至 `0007_reference_operation_leases`，`alembic check` 输出 `No new upgrade operations detected`。
+- `npm run test:e2e:compose -- --backend-check`：完整 Chromium UI/真实 Compose API 代理 E2E `6 passed`，覆盖文生图创建/刷新、图生图本地预览与幂等上传/冲突/私有素材读取、浏览器与服务端文件校验、创建 503 后以相同幂等键恢复、自动重试/终态失败/手动重试链，以及类型/状态筛选、cursor 分页与提示词搜索。栈停止并重启后，数据库任务元数据及私有 MinIO 结果稳定下载仍可用。脚本对独立测试数据库执行全量后端套件，结果 `292 passed, 10 skipped, 2 warnings`；10 项跳过为需显式启用的图生图 Compose、Mock Compose、模拟 DashScope、真实 MinIO、Redis Worker、maintenance Worker、参考素材 MinIO 和结果发布（3 项）门禁。默认关闭可避免重复启动嵌套服务或发出真实 Provider 请求；阶段 7 的 Mock Compose API/Worker 主链路已由上述 Playwright E2E 实测，阶段 1 至阶段 6 的服务门禁记录见前文。两条警告是既有 Starlette/httpx 与 AnyIO 弃用提示。
+- 视觉检查覆盖创建、素材上传、校验错误、详情、失败与重试、桌面历史及手机历史。Compose E2E 项目和命名卷已清理；没有连接、迁移或删除默认 `museflow` Compose 数据及 volume。
+- `git diff --check` 通过。阶段实现按前端、Compose 交付、Mock 限流模拟和 Compose 验收分逻辑提交；最终提交与工作区状态由交付报告记录。
 - 真实 Provider E2E：取得本窗口单次授权后仅发送 1 次创建 POST（HTTP 200），两次 GET 均 HTTP 200，状态 `RUNNING → SUCCEEDED`；从创建 POST 到访问核验与测试数据清理总计 19.806 秒。attempt `1/SUCCEEDED/COMPLETED`，无恢复或额外创建。输入 PNG/RGB 512×512、6,281 bytes，SHA-256 `431b2b3dafc9faee53203f1b714c9bcd28c85cd63cf740cd68050273177cac44`；输出 PNG/RGB 单帧 1280×1280、2,796,294 bytes，SHA-256 `d98566f984f173fd5b68290932ba374c3282b280f7aefaeac8523485c0ee2d39`。数据库权威 SHA 与 MinIO 下载字节 SHA 一致；MuseFlow 入口 307、签名下载 200、去签名匿名访问 403。实际 pinned IPv4 分类为公网；结果 host 摘要匹配冻结 allowlist；redirect 0。未查询账单控制台，费用仍未核账，单次估算上限 ¥0.20。脱敏记录见 [stage6-real-e2e.json](../../.scratch/provider-feasibility/evidence/stage6-real-e2e.json)。
 - 实际 E2E 使用隔离 Compose PostgreSQL/Redis/MinIO、正式 Scheduler iteration 和 Celery Worker test runner，经过 API/outbox/任务执行路径。完成后测试业务行与 MinIO 对象删除，隔离 Compose project/volumes 清理；默认 `museflow` 项目及数据卷未连接、迁移或删除。
 - 阶段 6 实现 commit：`d9e1809fe14bad85e3d19c13c82b3c494a4096cf`。真实请求后焦点单测与模拟 E2E 回归 `106 passed, 2 warnings`；完整后端套件 `292 passed, 9 skipped, 2 warnings` 在真实请求前对最终源码版本通过。自动重试关闭，状态未知不重发。
