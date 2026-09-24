@@ -1,4 +1,9 @@
-import type { TaskStatus } from '../../api/types'
+import type { GenerationType, TaskStatus } from '../../api/types'
+
+export const generationTypeLabels: Record<GenerationType, string> = {
+  TEXT_TO_IMAGE: '文生图',
+  IMAGE_TO_IMAGE: '图生图',
+}
 
 export const statusLabels: Record<TaskStatus, string> = {
   QUEUED: '排队中',
@@ -16,6 +21,7 @@ export const eventLabels: Record<string, string> = {
   TASK_RETRY_WAIT: '等待自动重试',
   TASK_SUCCEEDED: '结果已保存',
   TASK_FAILED: '任务失败',
+  TASK_MANUAL_RETRY_CREATED: '已创建手动重试任务',
 }
 
 export const phaseLabels: Record<string, string> = {
@@ -24,6 +30,9 @@ export const phaseLabels: Record<string, string> = {
   PROVIDER_RUNNING: '正在调用生成服务',
   PROVIDER_FAILED: '生成服务返回错误',
   RESULT_PERSISTED: '结果已安全保存',
+  PROVIDER_SUBMITTING: '正在提交生成请求',
+  RESULT_FETCHING: '正在安全读取结果图片',
+  PROVIDER_SUBMISSION_UNKNOWN: '生成服务是否接收请求尚未确认',
 }
 
 export function formatDate(value: string | null | undefined): string {

@@ -145,3 +145,53 @@ h1, h2, p { margin-top: 0; }
   .result-stage { min-height: 390px; }
   .task-inspector { display: block; }
 }
+
+.generation-choice { display: flex; flex-wrap: wrap; gap: 12px; margin: 0 0 28px; padding: 0; border: 0; }
+.generation-choice legend, .reference-picker legend { width: 100%; margin-bottom: 12px; color: #c8c4cf; font-size: 13px; font-weight: 650; }
+.generation-choice label { min-width: 220px; flex: 1; display: flex; align-items: flex-start; gap: 11px; padding: 14px 15px; border: 1px solid var(--border); border-radius: 12px; background: rgba(255,255,255,.025); cursor: pointer; }
+.generation-choice label:has(input:checked) { border-color: rgba(185,153,255,.48); background: rgba(185,153,255,.075); }
+.generation-choice input { width: 17px; height: 17px; margin: 2px 0 0; accent-color: var(--accent-strong); }
+.generation-choice label span { display: grid; gap: 5px; }
+.generation-choice strong { font-size: 13px; }
+.generation-choice small, .upload-guidance, .upload-state, .idempotency-note { color: var(--text-secondary); font-size: 12px; line-height: 1.6; }
+.reference-picker { min-width: 0; margin: 0 0 24px; padding: 19px; border: 1px solid var(--border); border-radius: 14px; background: rgba(7,8,11,.36); }
+.reference-picker legend { float: left; }
+.reference-picker legend + * { clear: both; }
+.upload-guidance { margin: 0 0 14px; }
+.reference-preview { max-width: 460px; overflow: hidden; margin: 13px 0; border: 1px solid var(--border); border-radius: 12px; background: #0c0d10; }
+.reference-preview img { display: block; width: 100%; max-height: 350px; min-height: 120px; object-fit: contain; }
+.reference-preview-meta { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px; padding: 10px 12px; color: var(--text-secondary); font-size: 11px; }
+.upload-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.upload-actions .button, .upload-select { min-height: 38px; padding: 0 13px; font-size: 12px; }
+.upload-select { border-color: var(--border-strong); background: rgba(255,255,255,.035); }
+.upload-warning { margin: 9px 0 0; color: var(--warning); font-size: 12px; }
+.upload-state { margin: 8px 0 0; }
+.upload-state-good { color: var(--success); font-size: 12px; }
+.idempotency-note { margin: 9px 0 0; }
+.field-error { word-break: break-word; }
+.card-badges { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; }
+.generation-badge { display: inline-flex; align-items: center; min-height: 25px; padding: 0 9px; border: 1px solid rgba(185,153,255,.2); border-radius: 999px; color: #c7b1f7; background: rgba(185,153,255,.06); font-size: 11px; font-weight: 650; }
+.reference-detail, .provider-detail { min-width: 0; margin-top: 23px; padding-top: 20px; border-top: 1px solid var(--border); }
+.reference-detail > img { display: block; width: 100%; max-height: 250px; object-fit: contain; border: 1px solid var(--border); border-radius: 10px; background: #0c0d10; }
+.asset-id { overflow-wrap: anywhere; margin: 9px 0 0; color: var(--text-secondary); font: 10px ui-monospace, monospace; }
+.provider-detail .fact-list > div { align-items: flex-start; }
+.provider-detail dd, .fact-list dd { max-width: 65%; overflow-wrap: anywhere; }
+.result-meta dd { overflow-wrap: anywhere; }
+.retry-line a { color: var(--accent); }
+.retry-help { margin: 0; color: var(--text-secondary); font-size: 11px; line-height: 1.5; }
+.asset-unavailable { padding: 22px; color: var(--text-secondary); font-size: 12px; line-height: 1.6; text-align: center; }
+.attempt-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; margin: 0 0 27px; padding: 0; list-style: none; }
+.attempt-list li { min-width: 0; display: grid; gap: 6px; padding: 14px; border: 1px solid var(--border); border-radius: 12px; background: rgba(255,255,255,.025); }
+.attempt-list strong { font-size: 13px; }
+.attempt-list span, .attempt-list small { overflow-wrap: anywhere; color: var(--text-secondary); font-size: 11px; }
+
+@media (max-width: 620px) {
+  .generation-choice { display: grid; }
+  .generation-choice label { min-width: 0; }
+  .reference-picker { padding: 15px; }
+  .upload-actions { align-items: stretch; }
+  .upload-actions .button { flex: 1 1 auto; }
+  .fact-list > div, .result-meta dl > div { gap: 10px; }
+  .provider-detail dd, .fact-list dd { max-width: 62%; }
+  .task-id { overflow-wrap: anywhere; }
+}

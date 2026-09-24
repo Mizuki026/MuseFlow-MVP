@@ -1,12 +1,14 @@
 import type {
   ApiErrorEnvelope,
-  CreateTaskBody,
+  CreateTaskInput,
+  ReferenceAsset,
   Task,
   TaskList,
+  GenerationType,
   TaskStatus,
 } from './types'
 
-const configuredBaseUrl = import.meta.env.VITE_API_BASE_URL ?? 'http://127.0.0.1:8000/api/v1'
+const configuredBaseUrl = import.meta.env.VITE_API_BASE_URL ?? '/api/v1'
 export const apiBaseUrl = configuredBaseUrl.replace(/\/$/, '')
 
 export class ApiError extends Error {
@@ -42,14 +44,18 @@ function isErrorEnvelope(value: unknown): value is ApiErrorEnvelope {
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${apiBaseUrl}${path}`, {
-    ...init,
-    headers: {
-      Accept: 'application/json',
-      ...(init?.body ? { 'Content-Type': 'application/json' } : {}),
-      ...init?.headers,
-    },
-  })
+  const headers = new Headers(init?.headers)
+  headers.set('Accept', 'application/json')
+  if (typeof init?.body === 'string' && !headers.has('Content-Type')) {
+    headers.set('Content-Type', 'application/json')
+  }
+  let response: Response
+  try {
+    response = await fetch(`${apiBaseUrl}${path}`, { ...init, headers })
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'AbortError') throw error
+    throw new ApiError(0, 'NETWORK_OUTCOME_UNKNOWN', 'network response is unknown')
+  }
   const body: unknown = await response.json().catch(() => null)
   if (!response.ok) {
     if (isErrorEnvelope(body)) {
@@ -66,22 +72,28 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const tasksApi = {
-  create(body: CreateTaskBody, idempotencyKey: string) {
+  create(body: CreateTaskInput, idempotencyKey: string) {
     return request<Task>('/tasks', {
       method: 'POST',
       headers: { 'Idempotency-Key': idempotencyKey },
       body: JSON.stringify(body),
     })
   },
-  get(taskId: string) {
-    return request<Task>(`/tasks/${encodeURIComponent(taskId)}`)
+  get(taskId: string, signal?: AbortSignal) {
+    return request<Task>(`/tasks/${encodeURIComponent(taskId)}`, { signal })
   },
-  list(params: { cursor?: string; limit?: number; status?: TaskStatus }) {
+  list(params: {
+    cursor?: string
+    limit?: number
+    status?: TaskStatus
+    generationType?: GenerationType
+  }, signal?: AbortSignal) {
     const query = new URLSearchParams()
     query.set('limit', String(params.limit ?? 9))
     if (params.cursor) query.set('cursor', params.cursor)
     if (params.status) query.set('status', params.status)
-    return request<TaskList>(`/tasks?${query}`)
+    if (params.generationType) query.set('generation_type', params.generationType)
+    return request<TaskList>(`/tasks?${query}`, { signal })
   },
   retry(taskId: string, idempotencyKey: string) {
     return request<Task>(`/tasks/${encodeURIComponent(taskId)}/retry`, {
@@ -91,7 +103,27 @@ export const tasksApi = {
   },
 }
 
+export const referenceAssetsApi = {
+  upload(file: File, idempotencyKey: string) {
+    const form = new FormData()
+    form.append('file', file, file.name)
+    return request<ReferenceAsset>('/assets', {
+      method: 'POST',
+      headers: { 'Idempotency-Key': idempotencyKey },
+      body: form,
+    })
+  },
+  get(assetId: string, signal?: AbortSignal) {
+    return request<ReferenceAsset>(`/assets/${encodeURIComponent(assetId)}`, { signal })
+  },
+}
+
 export function resultUrl(path: string | null | undefined): string | undefined {
   if (!path?.startsWith('/api/v1/assets/') || !path.endsWith('/download')) return undefined
-  return `${new URL(apiBaseUrl).origin}${path}`
+  return path
+}
+
+export function referenceAssetUrl(assetId: string | null | undefined): string | undefined {
+  if (!assetId || !/^[0-9a-f-]{36}$/i.test(assetId)) return undefined
+  return `/api/v1/assets/${encodeURIComponent(assetId)}/download`
 }
