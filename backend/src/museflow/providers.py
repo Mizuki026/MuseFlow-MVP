@@ -66,8 +66,15 @@ class TransientProviderError(ProviderError):
         message: str = "provider unavailable",
         *,
         diagnostic: str | None = None,
+        submission_state_unknown: bool = False,
     ) -> None:
-        super().__init__(code, message, retryable=True, diagnostic=diagnostic)
+        super().__init__(
+            code,
+            message,
+            retryable=True,
+            diagnostic=diagnostic,
+            submission_state_unknown=submission_state_unknown,
+        )
 
 
 class PermanentProviderError(ProviderError):
@@ -764,6 +771,13 @@ def create_provider_for_task(
     if profile.provider_name == "mock":
         return MockProvider(scenario=execution_profile or MockScenario.SUCCESS)
     if profile.provider_name == "dashscope":
+        if profile.profile_id == "dashscope-wan2.6-image-cn-beijing-edit":
+            try:
+                from museflow.dashscope_image_adapter import DashScopeWan26ImageAdapter
+
+                return DashScopeWan26ImageAdapter()
+            except ProviderConfigurationError:
+                return _UnavailableTaskProfileProvider()
         try:
             return DashScopeProvider()
         except ProviderConfigurationError:
