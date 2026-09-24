@@ -5,6 +5,130 @@
     "version": "0.1.0"
   },
   "paths": {
+    "/api/v1/assets": {
+      "post": {
+        "summary": "Upload Reference Asset",
+        "operationId": "upload_reference_asset_api_v1_assets_post",
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Idempotency-Key"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReferenceAssetResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/assets/{asset_id}": {
+      "get": {
+        "summary": "Get Reference Asset",
+        "operationId": "get_reference_asset_api_v1_assets__asset_id__get",
+        "parameters": [
+          {
+            "name": "asset_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Asset Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReferenceAssetResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/assets/{asset_id}/download": {
+      "get": {
+        "summary": "Download Asset",
+        "operationId": "download_asset_api_v1_assets__asset_id__download_get",
+        "parameters": [
+          {
+            "name": "asset_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Asset Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/tasks": {
       "post": {
         "summary": "Create Task Route",
@@ -116,6 +240,22 @@
                 }
               ],
               "title": "Status"
+            }
+          },
+          {
+            "name": "generation_type",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/GenerationType"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Generation Type"
             }
           }
         ],
@@ -315,44 +455,6 @@
         }
       }
     },
-    "/api/v1/assets/{asset_id}/download": {
-      "get": {
-        "summary": "Download Asset",
-        "operationId": "download_asset_api_v1_assets__asset_id__download_get",
-        "parameters": [
-          {
-            "name": "asset_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "format": "uuid",
-              "title": "Asset Id"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
     "/api/v1/health/live": {
       "get": {
         "summary": "Live",
@@ -420,6 +522,33 @@
           "prompt": {
             "type": "string",
             "title": "Prompt"
+          },
+          "generation_type": {
+            "$ref": "#/components/schemas/GenerationType",
+            "default": "TEXT_TO_IMAGE"
+          },
+          "size_preset": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Size Preset"
+          },
+          "reference_asset_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reference Asset Id"
           }
         },
         "additionalProperties": false,
@@ -434,6 +563,33 @@
           "prompt": {
             "type": "string",
             "title": "Prompt"
+          },
+          "generation_type": {
+            "$ref": "#/components/schemas/GenerationType",
+            "default": "TEXT_TO_IMAGE"
+          },
+          "size_preset": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Size Preset"
+          },
+          "reference_asset_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reference Asset Id"
           },
           "scenario": {
             "$ref": "#/components/schemas/MockScenario"
@@ -458,6 +614,14 @@
           "error"
         ],
         "title": "ErrorResponse"
+      },
+      "GenerationType": {
+        "type": "string",
+        "enum": [
+          "TEXT_TO_IMAGE",
+          "IMAGE_TO_IMAGE"
+        ],
+        "title": "GenerationType"
       },
       "HTTPValidationError": {
         "properties": {
@@ -485,16 +649,151 @@
         ],
         "title": "HealthResponse"
       },
+      "ImageToImageInputResponse": {
+        "properties": {
+          "generation_type": {
+            "type": "string",
+            "const": "IMAGE_TO_IMAGE",
+            "title": "Generation Type"
+          },
+          "prompt": {
+            "type": "string",
+            "title": "Prompt"
+          },
+          "size_preset": {
+            "type": "string",
+            "title": "Size Preset"
+          },
+          "reference_asset_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Reference Asset Id"
+          },
+          "reference_sha256": {
+            "type": "string",
+            "title": "Reference Sha256"
+          }
+        },
+        "type": "object",
+        "required": [
+          "generation_type",
+          "prompt",
+          "size_preset",
+          "reference_asset_id",
+          "reference_sha256"
+        ],
+        "title": "ImageToImageInputResponse"
+      },
       "MockScenario": {
         "type": "string",
         "enum": [
           "success",
+          "long_running_success",
           "transient_then_success",
           "rate_limited",
           "timeout",
           "permanent_failure"
         ],
         "title": "MockScenario"
+      },
+      "ReferenceAssetResponse": {
+        "properties": {
+          "asset_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Asset Id"
+          },
+          "status": {
+            "$ref": "#/components/schemas/ReferenceAssetStatus"
+          },
+          "content_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Content Type"
+          },
+          "width": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Width"
+          },
+          "height": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Height"
+          },
+          "size_bytes": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Size Bytes"
+          },
+          "sha256": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sha256"
+          },
+          "download_url": {
+            "type": "string",
+            "title": "Download Url"
+          },
+          "idempotency_replayed": {
+            "type": "boolean",
+            "title": "Idempotency Replayed",
+            "default": false
+          }
+        },
+        "type": "object",
+        "required": [
+          "asset_id",
+          "status",
+          "content_type",
+          "width",
+          "height",
+          "size_bytes",
+          "sha256",
+          "download_url"
+        ],
+        "title": "ReferenceAssetResponse"
+      },
+      "ReferenceAssetStatus": {
+        "type": "string",
+        "enum": [
+          "STAGING",
+          "READY",
+          "FAILED",
+          "DELETE_PENDING",
+          "DELETED"
+        ],
+        "title": "ReferenceAssetStatus"
       },
       "TaskAssetResponse": {
         "properties": {
@@ -514,6 +813,28 @@
           "size_bytes": {
             "type": "integer",
             "title": "Size Bytes"
+          },
+          "width": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Width"
+          },
+          "height": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Height"
           },
           "sha256": {
             "type": "string",
@@ -674,6 +995,16 @@
             "type": "string",
             "title": "Size Preset"
           },
+          "generation_type": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/GenerationType"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "status": {
             "$ref": "#/components/schemas/TaskStatus"
           },
@@ -819,6 +1150,121 @@
               }
             ],
             "title": "Retry Task Id"
+          },
+          "input_summary": {
+            "anyOf": [
+              {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/TextToImageInputResponse"
+                  },
+                  {
+                    "$ref": "#/components/schemas/ImageToImageInputResponse"
+                  }
+                ],
+                "discriminator": {
+                  "propertyName": "generation_type",
+                  "mapping": {
+                    "IMAGE_TO_IMAGE": "#/components/schemas/ImageToImageInputResponse",
+                    "TEXT_TO_IMAGE": "#/components/schemas/TextToImageInputResponse"
+                  }
+                }
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Input Summary"
+          },
+          "reference_asset_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reference Asset Id"
+          },
+          "reference_sha256": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reference Sha256"
+          },
+          "reference_download_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reference Download Url"
+          },
+          "provider_profile": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Provider Profile"
+          },
+          "provider_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Provider Name"
+          },
+          "model_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model Name"
+          },
+          "capability_version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Capability Version"
+          },
+          "policy_snapshot": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Policy Snapshot"
           }
         },
         "type": "object",
@@ -865,6 +1311,16 @@
           "size_preset": {
             "type": "string",
             "title": "Size Preset"
+          },
+          "generation_type": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/GenerationType"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "status": {
             "$ref": "#/components/schemas/TaskStatus"
@@ -988,6 +1444,30 @@
           "retried_from_task_id"
         ],
         "title": "TaskSummaryResponse"
+      },
+      "TextToImageInputResponse": {
+        "properties": {
+          "generation_type": {
+            "type": "string",
+            "const": "TEXT_TO_IMAGE",
+            "title": "Generation Type"
+          },
+          "prompt": {
+            "type": "string",
+            "title": "Prompt"
+          },
+          "size_preset": {
+            "type": "string",
+            "title": "Size Preset"
+          }
+        },
+        "type": "object",
+        "required": [
+          "generation_type",
+          "prompt",
+          "size_preset"
+        ],
+        "title": "TextToImageInputResponse"
       },
       "ValidationError": {
         "properties": {

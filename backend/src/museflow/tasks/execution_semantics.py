@@ -64,6 +64,8 @@ def classify_failure_domain(error_code: str, phase: AttemptPhase) -> FailureDoma
         return FailureDomain.RESULT_FETCHING
     if error_code == "RESULT_STORAGE_ERROR":
         return FailureDomain.RESULT_PERSISTENCE
+    if phase is AttemptPhase.INPUT_LOADING and error_code.startswith("PROVIDER_"):
+        return FailureDomain.PROVIDER_SUBMISSION
     return {
         AttemptPhase.INPUT_LOADING: FailureDomain.INPUT_LOADING,
         AttemptPhase.PROVIDER_SUBMITTING: FailureDomain.PROVIDER_SUBMISSION,
@@ -85,9 +87,7 @@ def next_phase_for_recovery(
     return phase
 
 
-def submission_outcome_is_unknown(
-    phase: AttemptPhase, *, has_remote_request_id: bool
-) -> bool:
+def submission_outcome_is_unknown(phase: AttemptPhase, *, has_remote_request_id: bool) -> bool:
     return not has_remote_request_id and phase in {
         AttemptPhase.PROVIDER_SUBMITTING,
         AttemptPhase.PROVIDER_RUNNING,
@@ -109,7 +109,15 @@ def decide_failure_action(
         return FailureAction.FAIL
     if submission_state_unknown:
         return FailureAction.FAIL
-    if phase is AttemptPhase.PROVIDER_SUBMITTING and not has_remote_request_id:
+    if phase is AttemptPhase.INPUT_LOADING and domain is FailureDomain.INPUT_LOADING:
+        return (
+            FailureAction.RETRY_SAME_ATTEMPT
+            if retryable and domain is FailureDomain.INPUT_LOADING
+            else FailureAction.FAIL
+        )
+    if phase in {AttemptPhase.INPUT_LOADING, AttemptPhase.PROVIDER_SUBMITTING} and (
+        not has_remote_request_id
+    ):
         if retryable and domain is FailureDomain.PROVIDER_SUBMISSION:
             return FailureAction.CREATE_NEW_ATTEMPT
         return FailureAction.FAIL

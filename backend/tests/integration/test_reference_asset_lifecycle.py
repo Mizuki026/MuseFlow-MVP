@@ -31,10 +31,11 @@ from museflow.reference_assets.maintenance import ReferenceAssetMaintenance
 from museflow.reference_assets.object_keys import reference_object_key
 from museflow.reference_assets.repository import (
     ReferenceAssetRepository,
-    ReferenceAssetStateError,
 )
+from museflow.tasks.application import CreateTask, TaskReferenceAssetError
 from museflow.tasks.dispatcher import OutboxDispatcher
-from museflow.tasks.domain import ReferenceAssetStatus
+from museflow.tasks.domain import CreateTaskRequest, GenerationType, ReferenceAssetStatus
+from museflow.tasks.repository import TaskRepository
 
 
 class InMemoryBlobStore:
@@ -165,37 +166,6 @@ def _cleanup(
             delete(GenerationTaskModel).where(GenerationTaskModel.reference_asset_id.in_(asset_ids))
         )
         session.execute(delete(ReferenceAssetModel).where(ReferenceAssetModel.id.in_(asset_ids)))
-
-
-def _insert_reference_task(session: Session, asset_id: UUID, sha256: str) -> UUID:
-    now = datetime.now(UTC)
-    task_id = uuid4()
-    session.add(
-        GenerationTaskModel(
-            id=task_id,
-            idempotency_key=f"reference-lock-task-{task_id}",
-            request_fingerprint="a" * 64,
-            prompt="internal reference lock test",
-            size_preset="1280*1280",
-            status="QUEUED",
-            max_attempts=3,
-            policy_version="reference-lock-test",
-            deadline_at=now + timedelta(minutes=10),
-            created_at=now,
-            queued_at=now,
-            version=1,
-            generation_type="IMAGE_TO_IMAGE",
-            reference_asset_id=asset_id,
-            reference_sha256=sha256,
-            provider_profile="mock-image-to-image-test",
-            provider_name="mock",
-            model_name="mock-reference-lock-test",
-            capability_version="test-v1",
-            policy_snapshot={"version": "test-v1"},
-        )
-    )
-    session.flush()
-    return task_id
 
 
 def test_staging_recovery_readies_valid_object_and_fails_missing_or_invalid_objects(
@@ -379,22 +349,28 @@ def test_reference_lock_and_delete_claim_are_serialized_and_fk_restricts_delete(
     asset_id = _create_asset(
         factory, blob_store, status=ReferenceAssetStatus.READY, created_at=now - timedelta(days=2)
     )
-    with factory() as session:
-        asset = session.get(ReferenceAssetModel, asset_id)
-        assert asset is not None
-        digest = asset.sha256
     locked = threading.Event()
     release = threading.Event()
     deletion_result: list[list[object]] = []
     task_ids: list[UUID] = []
     repo = ReferenceAssetRepository()
 
-    def create_reference() -> None:
-        with factory.begin() as session:
-            repo.lock_ready_for_reference(session, asset_id, expected_sha256=digest)
+    class BlockingTaskRepository(TaskRepository):
+        def add_queued_task(self, session, task):
             locked.set()
             assert release.wait(timeout=5)
-            task_ids.append(_insert_reference_task(session, asset_id, digest))
+            return super().add_queued_task(session, task)
+
+    def create_reference() -> None:
+        result = CreateTask(factory, repository=BlockingTaskRepository()).execute(
+            CreateTaskRequest(
+                prompt="reference lock test",
+                generation_type=GenerationType.IMAGE_TO_IMAGE,
+                reference_asset_id=asset_id,
+            ),
+            f"reference-lock-task-{uuid4()}",
+        )
+        task_ids.append(result.task.id)
 
     def claim_delete() -> None:
         assert locked.wait(timeout=5)
@@ -435,13 +411,23 @@ def test_reference_lock_and_delete_claim_are_serialized_and_fk_restricts_delete(
                 created_before=now - timedelta(hours=24),
                 limit=1,
             )
-        with pytest.raises(ReferenceAssetStateError):
-            with factory.begin() as session:
-                repo.lock_ready_for_reference(session, asset_id, expected_sha256=digest)
+        with pytest.raises(TaskReferenceAssetError) as error:
+            CreateTask(factory).execute(
+                CreateTaskRequest(
+                    prompt="must not attach deleting asset",
+                    generation_type=GenerationType.IMAGE_TO_IMAGE,
+                    reference_asset_id=asset_id,
+                ),
+                f"reference-delete-race-{uuid4()}",
+            )
+        assert error.value.code == "REFERENCE_ASSET_NOT_READY"
         with factory() as session:
             assert session.get(ReferenceAssetModel, asset_id).status == "DELETE_PENDING"
     finally:
         with factory.begin() as session:
+            session.execute(
+                delete(OutboxMessageModel).where(OutboxMessageModel.aggregate_id.in_(task_ids))
+            )
             session.execute(
                 delete(GenerationTaskModel).where(
                     GenerationTaskModel.reference_asset_id == asset_id

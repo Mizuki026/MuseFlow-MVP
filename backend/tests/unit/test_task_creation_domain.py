@@ -1,5 +1,5 @@
 from datetime import UTC, datetime
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -8,10 +8,12 @@ from museflow.tasks.domain import (
     DomainErrorCode,
     DomainValidationError,
     GenerationType,
+    ImageToImageInput,
     TaskPolicy,
     TaskStatus,
     create_queued_task,
     normalize_create_request,
+    request_fingerprint,
 )
 
 
@@ -52,19 +54,67 @@ def test_omitted_and_explicit_text_generation_type_have_the_same_normalized_fing
     assert omitted == explicit
 
 
-def test_image_to_image_is_rejected_until_its_creation_use_case_exists() -> None:
+def test_image_to_image_requires_one_reference_and_normalizes_server_digest() -> None:
     with pytest.raises(DomainValidationError) as error:
         normalize_create_request(
             CreateTaskRequest(prompt="edit this", generation_type=GenerationType.IMAGE_TO_IMAGE)
         )
 
-    assert error.value.code is DomainErrorCode.GENERATION_TYPE_UNSUPPORTED
+    assert error.value.code is DomainErrorCode.REFERENCE_ASSET_REQUIRED
+
+    reference_id = UUID("00000000-0000-0000-0000-000000000001")
+    request = normalize_create_request(
+        CreateTaskRequest(
+            prompt="edit this",
+            generation_type=GenerationType.IMAGE_TO_IMAGE,
+            reference_asset_id=reference_id,
+        ),
+        reference_sha256="a" * 64,
+    )
+    assert isinstance(request.input, ImageToImageInput)
+    assert request.input.reference_asset_id == reference_id
+    assert request.input.reference_sha256 == "a" * 64
 
 
 def test_text_to_image_does_not_accept_reference_asset_fields() -> None:
     with pytest.raises(DomainValidationError) as error:
-        normalize_create_request(
-            CreateTaskRequest(prompt="draw this", reference_sha256="a" * 64)
-        )
+        normalize_create_request(CreateTaskRequest(prompt="draw this", reference_asset_id=uuid4()))
 
     assert error.value.code is DomainErrorCode.REFERENCE_ASSET_NOT_ALLOWED
+
+
+def test_generation_type_and_reference_identity_are_in_the_stable_fingerprint() -> None:
+    reference_id = UUID("00000000-0000-0000-0000-000000000001")
+    first = normalize_create_request(
+        CreateTaskRequest(
+            prompt="edit",
+            generation_type=GenerationType.IMAGE_TO_IMAGE,
+            reference_asset_id=reference_id,
+        ),
+        reference_sha256="a" * 64,
+    )
+    changed_id = normalize_create_request(
+        CreateTaskRequest(
+            prompt="edit",
+            generation_type=GenerationType.IMAGE_TO_IMAGE,
+            reference_asset_id=UUID("00000000-0000-0000-0000-000000000002"),
+        ),
+        reference_sha256="a" * 64,
+    )
+    changed_sha = normalize_create_request(
+        CreateTaskRequest(
+            prompt="edit",
+            generation_type=GenerationType.IMAGE_TO_IMAGE,
+            reference_asset_id=reference_id,
+        ),
+        reference_sha256="b" * 64,
+    )
+
+    assert request_fingerprint(first) == (
+        "87cc463dcc67e78f0c68045a0bed79a03d7a2b0f5bcf0bff08fa26224dfbed5e"
+    )
+    assert request_fingerprint(first) != request_fingerprint(changed_id)
+    assert request_fingerprint(first) != request_fingerprint(changed_sha)
+    assert request_fingerprint(
+        normalize_create_request(CreateTaskRequest(prompt="same request"))
+    ) == ("84f63ef52ccba93e4dfc16712b4b16d296bd9d6da8906ee9618ae3989a685e53")

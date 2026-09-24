@@ -62,7 +62,9 @@ class ReferenceAssetInUseError(RuntimeError):
 
 
 class ReferenceAssetStateError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, code: str = "REFERENCE_ASSET_NOT_READY") -> None:
+        super().__init__(message)
+        self.code = code
 
 
 class ReferenceAssetRepository:
@@ -190,15 +192,29 @@ class ReferenceAssetRepository:
         session: Session,
         asset_id: UUID,
         *,
-        expected_sha256: str,
+        expected_sha256: str | None = None,
     ) -> ReferenceAssetRecord:
         model = session.scalar(
             select(ReferenceAssetModel).where(ReferenceAssetModel.id == asset_id).with_for_update()
         )
-        if model is None or model.status != ReferenceAssetStatus.READY.value:
+        if model is None:
+            raise ReferenceAssetStateError(
+                "reference asset was not found", code="REFERENCE_ASSET_NOT_FOUND"
+            )
+        if model.status != ReferenceAssetStatus.READY.value:
             raise ReferenceAssetStateError("reference asset is not ready")
-        if model.sha256 != expected_sha256:
-            raise ReferenceAssetStateError("reference asset digest changed")
+        if (
+            model.sha256 is None
+            or len(model.sha256) != 64
+            or any(character not in "0123456789abcdef" for character in model.sha256)
+        ):
+            raise ReferenceAssetStateError(
+                "reference asset digest is unavailable", code="REFERENCE_ASSET_INVALID"
+            )
+        if expected_sha256 is not None and model.sha256 != expected_sha256:
+            raise ReferenceAssetStateError(
+                "reference asset digest changed", code="REFERENCE_ASSET_INVALID"
+            )
         return _record(model)
 
     def report_unreferenced_ready(

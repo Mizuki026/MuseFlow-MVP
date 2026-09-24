@@ -14,9 +14,11 @@ from museflow.db.models import GenerationTaskModel
 from museflow.db.session import create_session_factory
 from museflow.providers import create_provider_for_task
 from museflow.queue import create_celery_app
+from museflow.reference_assets.access import ReferenceAssetReader
 from museflow.reference_assets.blob_store import MinioBlobStore
 from museflow.reference_assets.maintenance import ReferenceAssetMaintenance
 from museflow.runtime import worker_runtime_probe
+from museflow.tasks.domain import GenerationType
 from museflow.tasks.execution import ExecuteGenerationAttempt
 from museflow.tasks.result_publication import ResultPublicationStatus
 
@@ -45,9 +47,10 @@ def execute_task(task_id: str) -> None:
                 task.model_name,
                 task.capability_version,
                 task.execution_profile,
+                task.generation_type,
             )
             if task is not None
-            else ("", "", "", "", None)
+            else ("", "", "", "", None, GenerationType.TEXT_TO_IMAGE.value)
         )
     provider = create_provider_for_task(
         profile_id=profile_values[0],
@@ -55,12 +58,15 @@ def execute_task(task_id: str) -> None:
         model_name=profile_values[2],
         capability_version=profile_values[3],
         execution_profile=profile_values[4],
+        generation_type=GenerationType(profile_values[5]),
     )
     try:
+        reference_blobs = MinioBlobStore()
         outcome = ExecuteGenerationAttempt(
             factory,
             provider,
             asset_store=MinioResultAssetStore(),
+            reference_reader=ReferenceAssetReader(factory, reference_blobs),
         ).execute(UUID(task_id))
         if outcome.publication_status is ResultPublicationStatus.OWNERSHIP_LOST:
             logger.info(

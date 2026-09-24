@@ -5,6 +5,8 @@ import pytest
 from museflow.provider_profiles import (
     PROVIDER_PROFILES,
     ProviderProfileUnavailableError,
+    configured_profile,
+    require_profile_capability,
     selected_text_to_image_profile,
 )
 from museflow.providers import (
@@ -13,18 +15,40 @@ from museflow.providers import (
     ProviderError,
     create_provider_for_task,
 )
-from museflow.tasks.domain import GenerationType
+from museflow.tasks.domain import DomainValidationError, GenerationType
 
 
-def test_code_defined_profiles_only_advertise_the_supported_text_generation_type() -> None:
+def test_registry_freezes_capabilities_sizes_and_adapter_availability() -> None:
     assert set(PROVIDER_PROFILES) == {
         "mock-text-to-image-v1",
+        "mock-image-generation-v2",
         "dashscope-wan2.6-t2i-cn-beijing-v1",
     }
-    assert all(
-        profile.generation_types == frozenset({GenerationType.TEXT_TO_IMAGE})
-        for profile in PROVIDER_PROFILES.values()
+    assert PROVIDER_PROFILES["mock-image-generation-v2"].generation_types == frozenset(
+        GenerationType
     )
+    assert PROVIDER_PROFILES["mock-image-generation-v2"].input_content_types == frozenset(
+        {"image/png", "image/jpeg", "image/webp"}
+    )
+    assert PROVIDER_PROFILES["mock-image-generation-v2"].adapter_available is True
+    assert PROVIDER_PROFILES["dashscope-wan2.6-t2i-cn-beijing-v1"].generation_types == frozenset(
+        {GenerationType.TEXT_TO_IMAGE}
+    )
+
+
+def test_mock_profile_supports_both_types_and_dashscope_rejects_i2i_before_queue(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MUSEFLOW_PROVIDER", "mock")
+    profile = configured_profile(GenerationType.IMAGE_TO_IMAGE)
+    assert profile.profile_id == "mock-image-generation-v2"
+    require_profile_capability(profile, GenerationType.IMAGE_TO_IMAGE, "1280*1280")
+
+    monkeypatch.setenv("MUSEFLOW_PROVIDER", "dashscope")
+    profile = configured_profile(GenerationType.IMAGE_TO_IMAGE)
+    with pytest.raises(DomainValidationError) as error:
+        require_profile_capability(profile, GenerationType.IMAGE_TO_IMAGE, "1280*1280")
+    assert error.value.code.value == "PROVIDER_CAPABILITY_UNSUPPORTED"
 
 
 def test_new_mock_task_profile_is_selected_from_the_shared_registry(
@@ -41,6 +65,16 @@ def test_new_mock_task_profile_is_selected_from_the_shared_registry(
         capability_version=profile.capability_version,
     )
     assert isinstance(provider, MockProvider)
+
+    image_profile = configured_profile(GenerationType.IMAGE_TO_IMAGE)
+    image_provider = create_provider_for_task(
+        profile_id=image_profile.profile_id,
+        provider_name=image_profile.provider_name,
+        model_name=image_profile.model_name,
+        capability_version=image_profile.capability_version,
+        generation_type=GenerationType.IMAGE_TO_IMAGE,
+    )
+    assert isinstance(image_provider, MockProvider)
 
 
 def test_unavailable_frozen_profile_fails_without_switching_provider(

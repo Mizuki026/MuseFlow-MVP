@@ -9,7 +9,14 @@ from sqlalchemy import Select, select
 from sqlalchemy.orm import Session
 
 from museflow.db.models import GenerationTaskModel, OutboxMessageModel, TaskEventModel
-from museflow.tasks.domain import GenerationType, QueuedTask, TaskStatus
+from museflow.tasks.domain import (
+    GenerationType,
+    ImageToImageInput,
+    QueuedTask,
+    TaskInput,
+    TaskStatus,
+    TextToImageInput,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,6 +48,19 @@ class TaskRecord:
     model_name: str
     capability_version: str
     policy_snapshot: dict[str, Any]
+
+    @property
+    def input(self) -> TaskInput:
+        if self.generation_type is GenerationType.IMAGE_TO_IMAGE:
+            if self.reference_asset_id is None or self.reference_sha256 is None:
+                raise ValueError("image-to-image task is missing its reference snapshot")
+            return ImageToImageInput(
+                prompt=self.prompt,
+                size_preset=self.size_preset,
+                reference_asset_id=self.reference_asset_id,
+                reference_sha256=self.reference_sha256,
+            )
+        return TextToImageInput(prompt=self.prompt, size_preset=self.size_preset)
 
 
 @dataclass(frozen=True, slots=True)
@@ -201,10 +221,15 @@ class TaskRepository:
         limit: int,
         before: tuple[datetime, UUID] | None = None,
         status: TaskStatus | None = None,
+        generation_type: GenerationType | None = None,
     ) -> list[TaskRecord]:
         statement: Select[tuple[GenerationTaskModel]] = select(GenerationTaskModel)
         if status is not None:
             statement = statement.where(GenerationTaskModel.status == status.value)
+        if generation_type is not None:
+            statement = statement.where(
+                GenerationTaskModel.generation_type == generation_type.value
+            )
         if before is not None:
             created_at, task_id = before
             statement = statement.where(

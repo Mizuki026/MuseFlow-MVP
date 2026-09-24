@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Annotated, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from museflow.providers import MockScenario
 from museflow.tasks.domain import GenerationType, ReferenceAssetStatus, TaskStatus
@@ -16,8 +17,8 @@ class CreateTaskBody(BaseModel):
 
     prompt: str
     generation_type: GenerationType = GenerationType.TEXT_TO_IMAGE
+    size_preset: str | None = None
     reference_asset_id: UUID | None = None
-    reference_sha256: str | None = None
 
 
 class DemoCreateTaskBody(CreateTaskBody):
@@ -130,12 +131,41 @@ class TaskSummaryResponse(BaseModel):
         )
 
 
+class TextToImageInputResponse(BaseModel):
+    generation_type: Literal["TEXT_TO_IMAGE"]
+    prompt: str
+    size_preset: str
+
+
+class ImageToImageInputResponse(BaseModel):
+    generation_type: Literal["IMAGE_TO_IMAGE"]
+    prompt: str
+    size_preset: str
+    reference_asset_id: UUID
+    reference_sha256: str
+
+
 class TaskResponse(TaskSummaryResponse):
     idempotency_replayed: bool = False
     events: list[TaskEventResponse] = []
     attempts: list[TaskAttemptResponse] = []
     result: TaskAssetResponse | None = None
     retry_task_id: UUID | None = None
+    input_summary: (
+        Annotated[
+            TextToImageInputResponse | ImageToImageInputResponse,
+            Field(discriminator="generation_type"),
+        ]
+        | None
+    ) = None
+    reference_asset_id: UUID | None = None
+    reference_sha256: str | None = None
+    reference_download_url: str | None = None
+    provider_profile: str | None = None
+    provider_name: str | None = None
+    model_name: str | None = None
+    capability_version: str | None = None
+    policy_snapshot: dict[str, object] | None = None
 
 
 class TaskListResponse(BaseModel):

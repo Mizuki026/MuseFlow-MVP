@@ -32,8 +32,10 @@ class ReferenceAssetStatus(StrEnum):
 class DomainErrorCode(StrEnum):
     INVALID_PROMPT = "INVALID_PROMPT"
     INVALID_GENERATION_OPTIONS = "INVALID_GENERATION_OPTIONS"
-    GENERATION_TYPE_UNSUPPORTED = "GENERATION_TYPE_UNSUPPORTED"
+    PROVIDER_CAPABILITY_UNSUPPORTED = "PROVIDER_CAPABILITY_UNSUPPORTED"
     REFERENCE_ASSET_NOT_ALLOWED = "REFERENCE_ASSET_NOT_ALLOWED"
+    REFERENCE_ASSET_REQUIRED = "REFERENCE_ASSET_REQUIRED"
+    REFERENCE_ASSET_INVALID = "REFERENCE_ASSET_INVALID"
     RETRY_NOT_ALLOWED = "RETRY_NOT_ALLOWED"
 
 
@@ -51,18 +53,71 @@ class CreateTaskRequest:
     execution_profile: str | None = None
     generation_type: GenerationType = GenerationType.TEXT_TO_IMAGE
     reference_asset_id: UUID | None = None
-    reference_sha256: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class TextToImageInput:
+    prompt: str
+    size_preset: str
+
+    @property
+    def generation_type(self) -> GenerationType:
+        return GenerationType.TEXT_TO_IMAGE
+
+
+@dataclass(frozen=True, slots=True)
+class ImageToImageInput:
+    prompt: str
+    size_preset: str
+    reference_asset_id: UUID
+    reference_sha256: str
+
+    @property
+    def generation_type(self) -> GenerationType:
+        return GenerationType.IMAGE_TO_IMAGE
+
+
+TaskInput = TextToImageInput | ImageToImageInput
+
+
+@dataclass(frozen=True, slots=True)
+class VerifiedReferenceImage:
+    content: bytes
+    content_type: str
+    width: int
+    height: int
+    sha256: str
 
 
 @dataclass(frozen=True, slots=True)
 class NormalizedCreateTaskRequest:
-    prompt: str
-    size_preset: str
+    input: TaskInput
     image_count: int
     execution_profile: str | None
-    generation_type: GenerationType
-    reference_asset_id: UUID | None
-    reference_sha256: str | None
+
+    @property
+    def prompt(self) -> str:
+        return self.input.prompt
+
+    @property
+    def size_preset(self) -> str:
+        return self.input.size_preset
+
+    @property
+    def generation_type(self) -> GenerationType:
+        return self.input.generation_type
+
+    @property
+    def reference_asset_id(self) -> UUID | None:
+        if isinstance(self.input, ImageToImageInput):
+            return self.input.reference_asset_id
+        return None
+
+    @property
+    def reference_sha256(self) -> str | None:
+        if isinstance(self.input, ImageToImageInput):
+            return self.input.reference_sha256
+        return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,6 +181,19 @@ class QueuedTask:
     capability_version: str = "legacy-unknown"
     policy_snapshot: dict[str, object] = field(default_factory=lambda: dict[str, object]())
 
+    @property
+    def input(self) -> TaskInput:
+        if self.generation_type is GenerationType.IMAGE_TO_IMAGE:
+            if self.reference_asset_id is None or self.reference_sha256 is None:
+                raise ValueError("image-to-image task is missing its reference snapshot")
+            return ImageToImageInput(
+                prompt=self.prompt,
+                size_preset=self.size_preset,
+                reference_asset_id=self.reference_asset_id,
+                reference_sha256=self.reference_sha256,
+            )
+        return TextToImageInput(prompt=self.prompt, size_preset=self.size_preset)
+
 
 @dataclass(frozen=True, slots=True)
 class RetryPolicy:
@@ -150,29 +218,24 @@ def retry_is_allowed(error_code: str | None) -> bool:
         "PROVIDER_TIMEOUT",
         "PROVIDER_NOT_CONFIGURED",
         "PROVIDER_AUTHENTICATION",
+        "INPUT_STORAGE_UNAVAILABLE",
         "RESULT_STORAGE_ERROR",
         "RETRY_EXHAUSTED",
         "DEADLINE_EXCEEDED",
     }
 
 
-def normalize_create_request(request: CreateTaskRequest) -> NormalizedCreateTaskRequest:
+def normalize_create_request(
+    request: CreateTaskRequest,
+    *,
+    reference_sha256: str | None = None,
+) -> NormalizedCreateTaskRequest:
     try:
         generation_type = GenerationType(request.generation_type)
     except ValueError as error:
         raise DomainValidationError(
-            DomainErrorCode.GENERATION_TYPE_UNSUPPORTED, "generation type is not supported"
+            DomainErrorCode.PROVIDER_CAPABILITY_UNSUPPORTED, "generation type is not supported"
         ) from error
-    if generation_type is GenerationType.IMAGE_TO_IMAGE:
-        raise DomainValidationError(
-            DomainErrorCode.GENERATION_TYPE_UNSUPPORTED,
-            "image-to-image task creation is not available",
-        )
-    if request.reference_asset_id is not None or request.reference_sha256 is not None:
-        raise DomainValidationError(
-            DomainErrorCode.REFERENCE_ASSET_NOT_ALLOWED,
-            "text-to-image tasks cannot reference an image asset",
-        )
     if not request.prompt.strip():
         raise DomainValidationError(
             DomainErrorCode.INVALID_PROMPT,
@@ -188,14 +251,39 @@ def normalize_create_request(request: CreateTaskRequest) -> NormalizedCreateTask
             DomainErrorCode.INVALID_GENERATION_OPTIONS,
             "only the 1280*1280 single-image preset is supported",
         )
+    size_preset = request.size_preset or "1280*1280"
+    if generation_type is GenerationType.TEXT_TO_IMAGE:
+        if request.reference_asset_id is not None or reference_sha256 is not None:
+            raise DomainValidationError(
+                DomainErrorCode.REFERENCE_ASSET_NOT_ALLOWED,
+                "text-to-image tasks cannot reference an image asset",
+            )
+        input_value: TaskInput = TextToImageInput(request.prompt, size_preset)
+    else:
+        if request.reference_asset_id is None:
+            raise DomainValidationError(
+                DomainErrorCode.REFERENCE_ASSET_REQUIRED,
+                "image-to-image tasks require one reference asset",
+            )
+        if (
+            reference_sha256 is None
+            or len(reference_sha256) != 64
+            or any(character not in "0123456789abcdef" for character in reference_sha256)
+        ):
+            raise DomainValidationError(
+                DomainErrorCode.REFERENCE_ASSET_INVALID,
+                "image-to-image tasks require a server-verified reference digest",
+            )
+        input_value = ImageToImageInput(
+            prompt=request.prompt,
+            size_preset=size_preset,
+            reference_asset_id=request.reference_asset_id,
+            reference_sha256=reference_sha256,
+        )
     return NormalizedCreateTaskRequest(
-        prompt=request.prompt,
-        size_preset="1280*1280",
+        input=input_value,
         image_count=1,
         execution_profile=request.execution_profile,
-        generation_type=generation_type,
-        reference_asset_id=None,
-        reference_sha256=None,
     )
 
 
@@ -207,12 +295,14 @@ def request_fingerprint(request: NormalizedCreateTaskRequest) -> str:
     }
     if request.execution_profile is not None:
         payload["execution_profile"] = request.execution_profile
-    if request.generation_type is not GenerationType.TEXT_TO_IMAGE:
-        payload["generation_type"] = request.generation_type.value
-    if request.reference_asset_id is not None:
-        payload["reference_asset_id"] = str(request.reference_asset_id)
-    if request.reference_sha256 is not None:
-        payload["reference_sha256"] = request.reference_sha256
+    if isinstance(request.input, ImageToImageInput):
+        payload.update(
+            {
+                "generation_type": GenerationType.IMAGE_TO_IMAGE.value,
+                "reference_asset_id": str(request.input.reference_asset_id),
+                "reference_sha256": request.input.reference_sha256,
+            }
+        )
     canonical_request = json.dumps(
         payload,
         ensure_ascii=False,

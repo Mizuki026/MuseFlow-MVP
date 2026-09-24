@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import os
 import struct
 import threading
@@ -14,11 +15,16 @@ from typing import Any, Protocol, cast
 from urllib.parse import quote, urlparse
 
 import httpx
+from PIL import Image, ImageOps
 
 from museflow.assets import ResultDownloadError, SecureResultDownloader
 from museflow.provider_profiles import (
     profile_for_id,
     selected_text_to_image_profile,
+)
+from museflow.tasks.domain import (
+    GenerationType,
+    VerifiedReferenceImage,
 )
 from museflow.tasks.execution_semantics import AttemptPhase
 
@@ -81,10 +87,51 @@ class ProviderConfigurationError(PermanentProviderError):
 
 
 @dataclass(frozen=True, slots=True)
-class GenerationRequest:
+class TextToImageProviderInput:
     prompt: str
     size_preset: str
+
+
+@dataclass(frozen=True, slots=True)
+class ImageToImageProviderInput:
+    prompt: str
+    size_preset: str
+    reference_image: VerifiedReferenceImage
+
+
+ProviderInput = TextToImageProviderInput | ImageToImageProviderInput
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderGenerationRequest:
+    input: ProviderInput
     deadline_at: datetime | None = None
+
+    @property
+    def prompt(self) -> str:
+        return self.input.prompt
+
+    @property
+    def size_preset(self) -> str:
+        return self.input.size_preset
+
+    @property
+    def generation_type(self) -> GenerationType:
+        if isinstance(self.input, ImageToImageProviderInput):
+            return GenerationType.IMAGE_TO_IMAGE
+        return GenerationType.TEXT_TO_IMAGE
+
+
+def GenerationRequest(
+    prompt: str,
+    size_preset: str,
+    deadline_at: datetime | None = None,
+) -> ProviderGenerationRequest:
+    """Build the unified provider DTO for existing text-only call sites."""
+    return ProviderGenerationRequest(
+        input=TextToImageProviderInput(prompt=prompt, size_preset=size_preset),
+        deadline_at=deadline_at,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,7 +151,7 @@ class LeaseChecker(Protocol):
 class GenerationProvider(Protocol):
     def generate(
         self,
-        request: GenerationRequest,
+        request: ProviderGenerationRequest,
         *,
         request_key: str,
         remote_request_id: str | None,
@@ -121,6 +168,12 @@ class MockScenario(StrEnum):
     RATE_LIMITED = "rate_limited"
     TIMEOUT = "timeout"
     PERMANENT_FAILURE = "permanent_failure"
+
+
+@dataclass(frozen=True, slots=True)
+class MockProviderCall:
+    generation_type: GenerationType
+    reference_sha256: str | None
 
 
 def _png_chunk(chunk_type: bytes, payload: bytes) -> bytes:
@@ -186,10 +239,11 @@ class MockProvider:
         self.recovery_calls = 0
         self.poll_calls = 0
         self.result_fetch_calls = 0
+        self.call_records: list[MockProviderCall] = []
 
     def generate(
         self,
-        request: GenerationRequest,
+        request: ProviderGenerationRequest,
         *,
         request_key: str,
         remote_request_id: str | None,
@@ -197,17 +251,33 @@ class MockProvider:
         on_phase: Callable[[AttemptPhase], None] | None = None,
         lease_guard: LeaseChecker | None = None,
     ) -> GenerationResult:
+        reference_sha256: str | None = None
+        if isinstance(request.input, ImageToImageProviderInput):
+            reference_image = request.input.reference_image
+            reference_sha256 = hashlib.sha256(reference_image.content).hexdigest()
+            if reference_sha256 != reference_image.sha256:
+                raise PermanentProviderError(
+                    "INPUT_REFERENCE_INVALID", "verified reference content digest changed"
+                )
+        with self._counter_lock:
+            self.call_records.append(
+                MockProviderCall(
+                    generation_type=request.generation_type,
+                    reference_sha256=reference_sha256,
+                )
+            )
         if lease_guard is not None:
             lease_guard.require_ownership()
         if remote_request_id is None:
-            if self._failures:
-                raise self._failures.pop(0)
-            if self._scenario is MockScenario.TRANSIENT_THEN_SUCCESS and int(
-                request_key.rsplit(":attempt:", 1)[-1]
-            ) == 1:
-                raise TransientProviderError("PROVIDER_UNAVAILABLE", "mock provider is recovering")
             if on_phase is not None:
                 on_phase(AttemptPhase.PROVIDER_SUBMITTING)
+            if self._failures:
+                raise self._failures.pop(0)
+            if (
+                self._scenario is MockScenario.TRANSIENT_THEN_SUCCESS
+                and int(request_key.rsplit(":attempt:", 1)[-1]) == 1
+            ):
+                raise TransientProviderError("PROVIDER_UNAVAILABLE", "mock provider is recovering")
             if lease_guard is not None:
                 lease_guard.require_ownership()
             with self._counter_lock:
@@ -247,17 +317,57 @@ class MockProvider:
             lease_guard.require_ownership()
         if self._result_fetch_failures:
             raise self._result_fetch_failures.pop(0)
-        digest = hashlib.sha256(
-            f"{request.prompt}\n{request.size_preset}\n{request_key}".encode()
-        ).hexdigest()
+        if isinstance(request.input, ImageToImageProviderInput):
+            content = self._build_image_to_image_png(
+                request,
+                request_key=request_key,
+                reference=request.input.reference_image,
+                reference_sha256=reference_sha256,
+            )
+        else:
+            content = self._DEMO_PNG
+        digest = hashlib.sha256(content).hexdigest()
         return GenerationResult(
             provider_name=self.name,
             provider_request_id=remote_request_id,
             result_digest=f"mock-result-{request_key}",
             metadata={"sha256": digest, "content_type": "image/png"},
-            content=self._DEMO_PNG,
+            content=content,
             content_type="image/png",
         )
+
+    def _build_image_to_image_png(
+        self,
+        request: ProviderGenerationRequest,
+        *,
+        request_key: str,
+        reference: VerifiedReferenceImage,
+        reference_sha256: str | None,
+    ) -> bytes:
+        if reference_sha256 is None:
+            raise PermanentProviderError(
+                "INPUT_REFERENCE_INVALID", "image-to-image input is missing a reference"
+            )
+        seed = hashlib.sha256(
+            "\0".join(
+                (
+                    request.prompt,
+                    request.size_preset,
+                    reference_sha256,
+                    request_key,
+                    self._scenario.value,
+                )
+            ).encode("utf-8")
+        ).digest()
+        with Image.open(io.BytesIO(reference.content)) as source:
+            fitted = ImageOps.fit(
+                source.convert("RGB"), (1280, 1280), method=Image.Resampling.LANCZOS
+            )
+        overlay = Image.new("RGB", fitted.size, (seed[0], seed[1], seed[2]))
+        output = Image.blend(fitted, overlay, alpha=0.18)
+        buffer = io.BytesIO()
+        output.save(buffer, format="PNG", optimize=False)
+        return buffer.getvalue()
 
 
 class DashScopeProvider:
@@ -304,7 +414,7 @@ class DashScopeProvider:
 
     def generate(
         self,
-        request: GenerationRequest,
+        request: ProviderGenerationRequest,
         *,
         request_key: str,
         remote_request_id: str | None,
@@ -313,6 +423,10 @@ class DashScopeProvider:
         lease_guard: LeaseChecker | None = None,
     ) -> GenerationResult:
         del request_key
+        if not isinstance(request.input, TextToImageProviderInput):
+            raise PermanentProviderError(
+                "PROVIDER_CAPABILITY_UNSUPPORTED", "DashScope text profile cannot edit images"
+            )
         if request.size_preset != DASHSCOPE_SIZE:
             raise PermanentProviderError("PROVIDER_INVALID_REQUEST", "unsupported image size")
         if lease_guard is not None:
@@ -381,7 +495,7 @@ class DashScopeProvider:
             content_type=image.content_type,
         )
 
-    def _submit(self, request: GenerationRequest) -> str:
+    def _submit(self, request: ProviderGenerationRequest) -> str:
         try:
             response = self._send(
                 "POST",
@@ -586,7 +700,7 @@ class DashScopeProvider:
     def _mapping(value: object) -> dict[str, Any]:
         return cast(dict[str, Any], value) if isinstance(value, dict) else {}
 
-    def _remaining_timeout(self, request: GenerationRequest) -> float:
+    def _remaining_timeout(self, request: ProviderGenerationRequest) -> float:
         timeout = self._poll_timeout_seconds
         if request.deadline_at is not None:
             timeout = min(
@@ -613,7 +727,7 @@ class _UnavailableTaskProfileProvider:
 
     def generate(
         self,
-        request: GenerationRequest,
+        request: ProviderGenerationRequest,
         *,
         request_key: str,
         remote_request_id: str | None,
@@ -636,6 +750,7 @@ def create_provider_for_task(
     model_name: str,
     capability_version: str,
     execution_profile: str | None = None,
+    generation_type: GenerationType | None = None,
 ) -> GenerationProvider:
     profile = profile_for_id(profile_id)
     if (
@@ -643,6 +758,7 @@ def create_provider_for_task(
         or profile.provider_name != provider_name
         or profile.model_name != model_name
         or profile.capability_version != capability_version
+        or (generation_type is not None and generation_type not in profile.generation_types)
     ):
         return _UnavailableTaskProfileProvider()
     if profile.provider_name == "mock":

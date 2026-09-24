@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import tempfile
-from dataclasses import dataclass
+from collections.abc import Callable
 from pathlib import Path
 from uuid import UUID
 
@@ -20,22 +20,18 @@ from museflow.reference_assets.repository import (
     ReferenceAssetRepository,
     ReferenceAssetStateError,
 )
-from museflow.tasks.domain import ReferenceAssetStatus
+from museflow.tasks.domain import ReferenceAssetStatus, VerifiedReferenceImage
 
 
 class ReferenceObjectContentMismatchError(RuntimeError):
     pass
 
 
-@dataclass(frozen=True, slots=True)
-class VerifiedReferenceImage:
-    asset_id: UUID
-    content: bytes
-    content_type: str
-    size_bytes: int
-    sha256: str
-    width: int
-    height: int
+class ReferenceAssetReadError(RuntimeError):
+    def __init__(self, code: str, *, retryable: bool) -> None:
+        super().__init__(code.lower().replace("_", " "))
+        self.code = code
+        self.retryable = retryable
 
 
 class ReferenceAssetReader:
@@ -52,13 +48,23 @@ class ReferenceAssetReader:
         self._repository = repository or ReferenceAssetRepository()
         self._inspector = inspector or ImageInspector()
 
-    def read(self, asset_id: UUID) -> VerifiedReferenceImage:
+    def read(
+        self,
+        asset_id: UUID,
+        *,
+        expected_sha256: str | None = None,
+        ownership_guard: Callable[[], None] | None = None,
+    ) -> VerifiedReferenceImage:
+        if ownership_guard is not None:
+            ownership_guard()
         with self._session_factory() as session:
             record = self._repository.find(session, asset_id)
         if record is None:
             raise LookupError("reference asset was not found")
         if record.status is not ReferenceAssetStatus.READY:
             raise ReferenceAssetStateError("reference asset is not ready")
+        if expected_sha256 is not None and record.sha256 != expected_sha256:
+            raise ReferenceObjectContentMismatchError("reference asset digest changed")
         if (
             record.content_type is None
             or record.size_bytes is None
@@ -68,7 +74,11 @@ class ReferenceAssetReader:
         ):
             raise ReferenceObjectContentMismatchError("reference asset metadata is incomplete")
         try:
+            if ownership_guard is not None:
+                ownership_guard()
             stored = self._blob_store.stat(record.object_key)
+            if ownership_guard is not None:
+                ownership_guard()
         except BlobNotFoundError as error:
             raise FileNotFoundError("reference object is missing") from error
         if (
@@ -80,7 +90,11 @@ class ReferenceAssetReader:
                 "reference object does not match its metadata"
             )
         try:
+            if ownership_guard is not None:
+                ownership_guard()
             content = self._blob_store.get(record.object_key, max_bytes=record.size_bytes)
+            if ownership_guard is not None:
+                ownership_guard()
         except BlobObjectTooLargeError as error:
             raise ReferenceObjectContentMismatchError(
                 "reference object exceeds its recorded size"
@@ -96,7 +110,11 @@ class ReferenceAssetReader:
             path = Path(file.name)
             file.write(content)
         try:
+            if ownership_guard is not None:
+                ownership_guard()
             actual = self._inspector.inspect(path, declared_content_type=record.content_type)
+            if ownership_guard is not None:
+                ownership_guard()
         except ImageInspectionError as error:
             raise ReferenceObjectContentMismatchError(
                 "reference object image metadata is invalid"
@@ -114,14 +132,39 @@ class ReferenceAssetReader:
                 "reference object does not match its metadata"
             )
         return VerifiedReferenceImage(
-            asset_id=asset_id,
             content=content,
             content_type=actual.content_type,
-            size_bytes=actual.size_bytes,
             sha256=actual.sha256,
             width=actual.width,
             height=actual.height,
         )
+
+    def read_for_task(
+        self,
+        asset_id: UUID,
+        *,
+        expected_sha256: str,
+        ownership_guard: Callable[[], None],
+    ) -> VerifiedReferenceImage:
+        try:
+            image = self.read(
+                asset_id,
+                expected_sha256=expected_sha256,
+                ownership_guard=ownership_guard,
+            )
+        except BlobStoreUnavailable as error:
+            raise ReferenceAssetReadError("INPUT_STORAGE_UNAVAILABLE", retryable=True) from error
+        except (ReferenceObjectContentMismatchError, BlobObjectTooLargeError) as error:
+            raise ReferenceAssetReadError("INPUT_REFERENCE_INVALID", retryable=False) from error
+        except FileNotFoundError as error:
+            raise ReferenceAssetReadError(
+                "INPUT_REFERENCE_OBJECT_MISSING", retryable=False
+            ) from error
+        except LookupError as error:
+            raise ReferenceAssetReadError("INPUT_REFERENCE_MISSING", retryable=False) from error
+        except ReferenceAssetStateError as error:
+            raise ReferenceAssetReadError("INPUT_REFERENCE_UNAVAILABLE", retryable=False) from error
+        return image
 
     def record(self, asset_id: UUID) -> ReferenceAssetRecord:
         with self._session_factory() as session:

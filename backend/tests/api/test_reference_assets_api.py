@@ -14,12 +14,18 @@ from PIL import Image
 from sqlalchemy import delete, select
 
 from museflow.api.app import create_app
-from museflow.db.models import OutboxMessageModel, ReferenceAssetModel
+from museflow.db.models import (
+    GenerationTaskModel,
+    OutboxMessageModel,
+    ReferenceAssetModel,
+    TaskEventModel,
+)
 from museflow.db.session import create_session_factory
 from museflow.reference_assets.image_inspector import ImageInspector
 from museflow.reference_assets.object_keys import reference_object_key
 from museflow.reference_assets.service import reference_request_fingerprint
 from museflow.tasks.domain import ReferenceAssetStatus
+from museflow.tasks.execution_models import GenerationAttemptModel
 
 
 class InMemoryBlobStore:
@@ -133,9 +139,7 @@ def test_upload_is_idempotent_and_download_uses_verified_stable_path(api) -> Non
 
         metadata = client.get(f"/api/v1/assets/{asset_id}")
         downloaded = client.get(f"/api/v1/assets/{asset_id}/download")
-        signed_access = client.get(
-            f"/api/v1/assets/{asset_id}/access", follow_redirects=False
-        )
+        signed_access = client.get(f"/api/v1/assets/{asset_id}/access", follow_redirects=False)
         assert metadata.status_code == 200
         assert metadata.json()["sha256"] == hashlib.sha256(png).hexdigest()
         assert downloaded.status_code == 200
@@ -146,6 +150,119 @@ def test_upload_is_idempotent_and_download_uses_verified_stable_path(api) -> Non
         assert signed_access.headers["location"].endswith("?expires=300")
         assert client.get("/api/v1/assets/missing").status_code == 422
     finally:
+        _cleanup(factory, blob_store, asset_ids)
+
+
+def test_uploaded_ready_asset_creates_idempotent_image_to_image_task_and_detail(api, monkeypatch):
+    client, factory, blob_store = api
+    monkeypatch.setenv("MUSEFLOW_PROVIDER", "mock")
+    content = _png((15, 90, 160))
+    asset_ids: list[UUID] = []
+    task_ids: list[UUID] = []
+    try:
+        uploaded = client.post(
+            "/api/v1/assets",
+            headers={"Idempotency-Key": f"i2i-upload-{uuid4()}"},
+            files={"file": ("input.png", content, "image/png")},
+        )
+        assert uploaded.status_code == 201
+        asset_id = UUID(uploaded.json()["asset_id"])
+        asset_ids.append(asset_id)
+        assert uploaded.json()["status"] == "READY"
+
+        task_request = {
+            "generation_type": "IMAGE_TO_IMAGE",
+            "prompt": "turn this into a blue-hour illustration",
+            "size_preset": "1280*1280",
+            "reference_asset_id": str(asset_id),
+        }
+        key = f"i2i-task-{uuid4()}"
+        created = client.post("/api/v1/tasks", headers={"Idempotency-Key": key}, json=task_request)
+        replay = client.post("/api/v1/tasks", headers={"Idempotency-Key": key}, json=task_request)
+        assert created.status_code == 201
+        assert created.json()["generation_type"] == "IMAGE_TO_IMAGE"
+        assert created.json()["idempotency_replayed"] is False
+        assert replay.status_code == 200
+        assert replay.json()["id"] == created.json()["id"]
+        assert replay.json()["idempotency_replayed"] is True
+        task_id = UUID(created.json()["id"])
+        task_ids.append(task_id)
+
+        with factory() as session:
+            task = session.get(GenerationTaskModel, task_id)
+            assert task is not None
+            assert task.reference_asset_id == asset_id
+            assert task.reference_sha256 == hashlib.sha256(content).hexdigest()
+            assert task.provider_profile == "mock-image-generation-v2"
+            assert task.model_name == "mock-deterministic-image"
+            assert task.capability_version == "image-generation-v2"
+            assert (
+                session.scalar(
+                    select(OutboxMessageModel.id).where(OutboxMessageModel.aggregate_id == task_id)
+                )
+                is not None
+            )
+            assert (
+                len(
+                    list(
+                        session.scalars(
+                            select(TaskEventModel).where(TaskEventModel.task_id == task_id)
+                        )
+                    )
+                )
+                == 1
+            )
+
+        detail = client.get(f"/api/v1/tasks/{task_id}")
+        assert detail.status_code == 200
+        detail_body = detail.json()
+        assert detail_body["input_summary"] == {
+            "generation_type": "IMAGE_TO_IMAGE",
+            "prompt": task_request["prompt"],
+            "size_preset": "1280*1280",
+            "reference_asset_id": str(asset_id),
+            "reference_sha256": hashlib.sha256(content).hexdigest(),
+        }
+        assert detail_body["reference_download_url"] == f"/api/v1/assets/{asset_id}/download"
+        assert detail_body["provider_profile"] == "mock-image-generation-v2"
+        assert "object_key" not in detail_body
+        assert "remote_request_id" not in detail_body
+
+        history = client.get(
+            "/api/v1/tasks",
+            params={"generation_type": "IMAGE_TO_IMAGE", "status": "QUEUED"},
+        )
+        assert history.status_code == 200
+        assert [item["id"] for item in history.json()["items"]] == [str(task_id)]
+
+        different_asset = client.post(
+            "/api/v1/assets",
+            headers={"Idempotency-Key": f"i2i-upload-{uuid4()}"},
+            files={"file": ("same-content.png", content, "image/png")},
+        )
+        assert different_asset.status_code == 201
+        different_id = UUID(different_asset.json()["asset_id"])
+        asset_ids.append(different_id)
+        conflict = client.post(
+            "/api/v1/tasks",
+            headers={"Idempotency-Key": key},
+            json={**task_request, "reference_asset_id": str(different_id)},
+        )
+        assert conflict.status_code == 409
+        assert conflict.json()["error"]["code"] == "IDEMPOTENCY_KEY_CONFLICT"
+    finally:
+        with factory.begin() as session:
+            for task_id in task_ids:
+                session.execute(
+                    delete(GenerationAttemptModel).where(GenerationAttemptModel.task_id == task_id)
+                )
+                session.execute(delete(TaskEventModel).where(TaskEventModel.task_id == task_id))
+                session.execute(
+                    delete(OutboxMessageModel).where(OutboxMessageModel.aggregate_id == task_id)
+                )
+                session.execute(
+                    delete(GenerationTaskModel).where(GenerationTaskModel.id == task_id)
+                )
         _cleanup(factory, blob_store, asset_ids)
 
 

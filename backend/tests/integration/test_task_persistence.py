@@ -7,8 +7,14 @@ from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 import pytest
+from sqlalchemy import delete, select
 
-from museflow.db.models import GenerationTaskModel, OutboxMessageModel, TaskEventModel
+from museflow.db.models import (
+    GenerationTaskModel,
+    OutboxMessageModel,
+    ReferenceAssetModel,
+    TaskEventModel,
+)
 from museflow.db.session import create_session_factory
 from museflow.tasks.application import (
     CreateTask,
@@ -17,7 +23,12 @@ from museflow.tasks.application import (
     ListTasks,
     TaskNotFoundError,
 )
-from museflow.tasks.domain import CreateTaskRequest, TaskStatus
+from museflow.tasks.domain import (
+    CreateTaskRequest,
+    GenerationType,
+    ReferenceAssetStatus,
+    TaskStatus,
+)
 from museflow.tasks.repository import TaskRepository
 
 
@@ -125,3 +136,112 @@ def test_cursor_order_and_status_filter_are_stable(session_factory) -> None:
     assert [item.prompt for item in first_page.items] == ["history 2", "history 1"]
     assert [item.prompt for item in second_page.items] == ["history 0"]
     assert all(item.status is TaskStatus.QUEUED for item in queued_page.items)
+
+
+def test_image_to_image_creation_is_atomic_and_history_filter_keeps_cursor_order(
+    session_factory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MUSEFLOW_PROVIDER", "mock")
+    asset_id = UUID("00000000-0000-0000-0000-000000000777")
+    now = datetime(2026, 9, 24, 12, 0, tzinfo=UTC)
+    with session_factory.begin() as session:
+        session.add(
+            ReferenceAssetModel(
+                id=asset_id,
+                idempotency_key="history-reference-asset",
+                request_fingerprint="f" * 64,
+                status=ReferenceAssetStatus.READY.value,
+                object_key=f"references/{asset_id}/{'a' * 64}.png",
+                content_type="image/png",
+                size_bytes=512,
+                width=512,
+                height=512,
+                sha256="a" * 64,
+                created_at=now,
+                ready_at=now,
+            )
+        )
+
+    class FailingOutboxRepository(TaskRepository):
+        def add_execution_outbox(self, session, task):
+            raise RuntimeError("outbox unavailable")
+
+    rollback_task_id = UUID("00000000-0000-0000-0000-000000000778")
+    task_ids: list[UUID] = []
+    try:
+        with pytest.raises(RuntimeError, match="outbox unavailable"):
+            CreateTask(
+                session_factory,
+                repository=FailingOutboxRepository(),
+                id_factory=lambda: rollback_task_id,
+            ).execute(
+                CreateTaskRequest(
+                    prompt="atomic image edit",
+                    generation_type=GenerationType.IMAGE_TO_IMAGE,
+                    reference_asset_id=asset_id,
+                ),
+                "image-edit-rollback",
+            )
+        with session_factory() as session:
+            assert session.get(GenerationTaskModel, rollback_task_id) is None
+            assert session.scalar(
+                select(OutboxMessageModel.id).where(
+                    OutboxMessageModel.aggregate_id == rollback_task_id
+                )
+            ) is None
+            assert session.scalar(
+                select(TaskEventModel.id).where(TaskEventModel.task_id == rollback_task_id)
+            ) is None
+
+        instants = iter(now + timedelta(minutes=index) for index in range(4))
+        create = CreateTask(session_factory, clock=lambda: next(instants))
+        for index, generation_type in enumerate(
+            (
+                GenerationType.TEXT_TO_IMAGE,
+                GenerationType.IMAGE_TO_IMAGE,
+                GenerationType.TEXT_TO_IMAGE,
+                GenerationType.IMAGE_TO_IMAGE,
+            )
+        ):
+            task_ids.append(
+                create.execute(
+                    CreateTaskRequest(
+                        prompt=f"history item {index}",
+                        generation_type=generation_type,
+                        reference_asset_id=(
+                            asset_id if generation_type is GenerationType.IMAGE_TO_IMAGE else None
+                        ),
+                    ),
+                    f"history-filter-{index}",
+                ).task.id
+            )
+
+        listing = ListTasks(session_factory)
+        first_page = listing.execute(
+            limit=1,
+            status=TaskStatus.QUEUED,
+            generation_type=GenerationType.IMAGE_TO_IMAGE,
+        )
+        second_page = listing.execute(
+            limit=1,
+            cursor=first_page.next_cursor,
+            status=TaskStatus.QUEUED,
+            generation_type=GenerationType.IMAGE_TO_IMAGE,
+        )
+        all_types = listing.execute(limit=10, status=TaskStatus.QUEUED)
+
+        assert [task.id for task in first_page.items] == [task_ids[3]]
+        assert [task.id for task in second_page.items] == [task_ids[1]]
+        assert second_page.next_cursor is None
+        assert len(all_types.items) == 4
+        assert {task.generation_type for task in all_types.items} == set(GenerationType)
+    finally:
+        with session_factory.begin() as session:
+            session.execute(
+                delete(OutboxMessageModel).where(OutboxMessageModel.aggregate_id.in_(task_ids))
+            )
+            session.execute(delete(TaskEventModel).where(TaskEventModel.task_id.in_(task_ids)))
+            session.execute(
+                delete(GenerationTaskModel).where(GenerationTaskModel.id.in_(task_ids))
+            )
+            session.execute(delete(ReferenceAssetModel).where(ReferenceAssetModel.id == asset_id))

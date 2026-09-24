@@ -81,7 +81,7 @@ def test_omitted_and_explicit_text_generation_type_keep_idempotency_compatible(
     assert conflict.json()["error"]["code"] == "IDEMPOTENCY_KEY_CONFLICT"
 
 
-def test_unsupported_image_to_image_and_text_references_are_rejected(
+def test_image_to_image_without_reference_and_text_references_are_rejected(
     client: TestClient,
 ) -> None:
     unsupported = client.post(
@@ -96,9 +96,24 @@ def test_unsupported_image_to_image_and_text_references_are_rejected(
     )
 
     assert unsupported.status_code == 422
-    assert unsupported.json()["error"]["code"] == "GENERATION_TYPE_UNSUPPORTED"
+    assert unsupported.json()["error"]["code"] == "REFERENCE_ASSET_REQUIRED"
     assert reference.status_code == 422
     assert reference.json()["error"]["code"] == "REFERENCE_ASSET_NOT_ALLOWED"
+
+
+def test_create_request_rejects_client_supplied_reference_digest(client: TestClient) -> None:
+    response = client.post(
+        "/api/v1/tasks",
+        headers={"Idempotency-Key": "api-client-reference-digest"},
+        json={
+            "prompt": "edit this",
+            "generation_type": "IMAGE_TO_IMAGE",
+            "reference_asset_id": str(uuid4()),
+            "reference_sha256": "a" * 64,
+        },
+    )
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "INVALID_REQUEST"
 
 
 def test_unavailable_selected_provider_profile_returns_stable_configuration_error(
@@ -166,11 +181,14 @@ def test_demo_route_is_opt_in_and_keeps_execution_profile_internal() -> None:
     hidden = TestClient(create_app(session_factory=session_factory, demo_mode=False))
     enabled = TestClient(create_app(session_factory=session_factory, demo_mode=True))
 
-    assert hidden.post(
-        "/api/v1/demo/tasks",
-        headers={"Idempotency-Key": f"hidden-{uuid4()}"},
-        json={"prompt": "hidden", "scenario": "success"},
-    ).status_code == 404
+    assert (
+        hidden.post(
+            "/api/v1/demo/tasks",
+            headers={"Idempotency-Key": f"hidden-{uuid4()}"},
+            json={"prompt": "hidden", "scenario": "success"},
+        ).status_code
+        == 404
+    )
 
     response = enabled.post(
         "/api/v1/demo/tasks",
@@ -240,9 +258,13 @@ def test_historical_result_asset_still_downloads_from_its_saved_object_key() -> 
     if not database_url:
         pytest.skip("MUSEFLOW_TEST_DATABASE_URL is required for API tests")
     session_factory = create_session_factory(database_url)
-    task_id = CreateTask(session_factory).execute(
-        CreateTaskRequest(prompt="historical result download"), f"history-download-{uuid4()}"
-    ).task.id
+    task_id = (
+        CreateTask(session_factory)
+        .execute(
+            CreateTaskRequest(prompt="historical result download"), f"history-download-{uuid4()}"
+        )
+        .task.id
+    )
 
     class RecordingAssetStore:
         def __init__(self) -> None:
@@ -251,9 +273,7 @@ def test_historical_result_asset_still_downloads_from_its_saved_object_key() -> 
         def put_result(self, **_: object) -> StoredAsset:
             raise AssertionError("the historical download route must not write an object")
 
-        def presigned_download(
-            self, object_key: str, *, expires_seconds: int = 300
-        ) -> str:
+        def presigned_download(self, object_key: str, *, expires_seconds: int = 300) -> str:
             self.download_keys.append(object_key)
             return f"https://objects.example/{object_key}?expires={expires_seconds}"
 
@@ -382,9 +402,11 @@ def test_new_result_persists_actual_dimensions_from_image_bytes() -> None:
             return None
 
     store = RecordingAssetStore()
-    task_id = CreateTask(session_factory).execute(
-        CreateTaskRequest(prompt="result with actual dimensions"), f"dimension-{uuid4()}"
-    ).task.id
+    task_id = (
+        CreateTask(session_factory)
+        .execute(CreateTaskRequest(prompt="result with actual dimensions"), f"dimension-{uuid4()}")
+        .task.id
+    )
     try:
         outcome = ExecuteGenerationAttempt(
             session_factory, MockProvider(), asset_store=store

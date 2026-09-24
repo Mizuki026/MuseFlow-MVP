@@ -21,6 +21,7 @@ from museflow.api.dto import (
     DemoCreateTaskBody,
     ErrorResponse,
     HealthResponse,
+    ImageToImageInputResponse,
     ReferenceAssetResponse,
     TaskAssetResponse,
     TaskAttemptResponse,
@@ -28,11 +29,12 @@ from museflow.api.dto import (
     TaskListResponse,
     TaskResponse,
     TaskSummaryResponse,
+    TextToImageInputResponse,
 )
 from museflow.assets import MinioResultAssetStore, ResultAssetStore
 from museflow.db.models import GenerationTaskModel, ReferenceAssetModel, ResultAssetModel
 from museflow.db.session import create_session_factory
-from museflow.provider_profiles import ProviderProfileUnavailableError
+from museflow.provider_profiles import PROVIDER_PROFILES, ProviderProfileUnavailableError
 from museflow.reference_assets.access import (
     AssetAccessSigner,
     ReferenceAssetReader,
@@ -54,13 +56,14 @@ from museflow.tasks.application import (
     ListTasks,
     ManualRetryNotAllowedError,
     TaskNotFoundError,
+    TaskReferenceAssetError,
 )
 from museflow.tasks.domain import (
     CreateTaskRequest,
     DomainValidationError,
+    GenerationType,
     ProviderTaskSnapshot,
     ReferenceAssetStatus,
-    TaskPolicy,
     TaskStatus,
 )
 from museflow.tasks.execution_models import GenerationAttemptModel
@@ -207,10 +210,7 @@ def create_app(
     app = FastAPI(title="MuseFlow API", version="0.1.0")
     allowed_origins = os.environ.get(
         "MUSEFLOW_CORS_ORIGINS",
-        (
-            "http://127.0.0.1:5173,http://localhost:5173,"
-            "http://127.0.0.1:4173,http://localhost:4173"
-        ),
+        ("http://127.0.0.1:5173,http://localhost:5173,http://127.0.0.1:4173,http://localhost:4173"),
     )
     app.add_middleware(
         CORSMiddleware,
@@ -250,6 +250,16 @@ def create_app(
         request: Request, error: ManualRetryNotAllowedError
     ) -> JSONResponse:
         return _error_response(request, ApiError(409, "RETRY_NOT_ALLOWED", str(error)))
+
+    @app.exception_handler(TaskReferenceAssetError)
+    async def handle_task_reference_error(
+        request: Request, error: TaskReferenceAssetError
+    ) -> JSONResponse:
+        status_code = 404 if error.code == "REFERENCE_ASSET_NOT_FOUND" else 409
+        return _error_response(
+            request,
+            ApiError(status_code, error.code, "reference asset is not available for this task"),
+        )
 
     @app.exception_handler(ProviderProfileUnavailableError)
     async def handle_provider_profile_unavailable(
@@ -423,7 +433,7 @@ def create_app(
             media_type=verified.content_type,
             headers={
                 "Cache-Control": "private, no-store",
-                "Content-Length": str(verified.size_bytes),
+                "Content-Length": str(len(verified.content)),
             },
         )
 
@@ -468,9 +478,9 @@ def create_app(
         result = create_task.execute(
             CreateTaskRequest(
                 prompt=body.prompt,
+                size_preset=body.size_preset,
                 generation_type=body.generation_type,
                 reference_asset_id=body.reference_asset_id,
-                reference_sha256=body.reference_sha256,
             ),
             idempotency_key=idempotency_key,
         )
@@ -503,17 +513,33 @@ def create_app(
             result = create_task.execute(
                 CreateTaskRequest(
                     prompt=body.prompt,
+                    size_preset=body.size_preset,
                     execution_profile=body.scenario.value,
                     generation_type=body.generation_type,
                     reference_asset_id=body.reference_asset_id,
-                    reference_sha256=body.reference_sha256,
                 ),
                 idempotency_key=idempotency_key,
                 provider_snapshot=ProviderTaskSnapshot(
-                    profile="mock-text-to-image-v1",
-                    provider_name="mock",
-                    model_name="mock-deterministic-image",
-                    capability_version="text-to-image-v1",
+                    profile=(
+                        "mock-image-generation-v2"
+                        if body.generation_type is GenerationType.IMAGE_TO_IMAGE
+                        else "mock-text-to-image-v1"
+                    ),
+                    provider_name=PROVIDER_PROFILES[
+                        "mock-image-generation-v2"
+                        if body.generation_type is GenerationType.IMAGE_TO_IMAGE
+                        else "mock-text-to-image-v1"
+                    ].provider_name,
+                    model_name=PROVIDER_PROFILES[
+                        "mock-image-generation-v2"
+                        if body.generation_type is GenerationType.IMAGE_TO_IMAGE
+                        else "mock-text-to-image-v1"
+                    ].model_name,
+                    capability_version=PROVIDER_PROFILES[
+                        "mock-image-generation-v2"
+                        if body.generation_type is GenerationType.IMAGE_TO_IMAGE
+                        else "mock-text-to-image-v1"
+                    ].capability_version,
                 ),
             )
             response = TaskSummaryResponse.from_record(result.task)
@@ -564,12 +590,39 @@ def create_app(
                 sha256=asset.sha256,
                 download_url=f"/api/v1/assets/{asset.id}/download",
             )
+        if detail.task.generation_type is GenerationType.IMAGE_TO_IMAGE:
+            assert detail.task.reference_asset_id is not None
+            assert detail.task.reference_sha256 is not None
+            input_summary = ImageToImageInputResponse(
+                generation_type="IMAGE_TO_IMAGE",
+                prompt=detail.task.prompt,
+                size_preset=detail.task.size_preset,
+                reference_asset_id=detail.task.reference_asset_id,
+                reference_sha256=detail.task.reference_sha256,
+            )
+            reference_download_url = f"/api/v1/assets/{detail.task.reference_asset_id}/download"
+        else:
+            input_summary = TextToImageInputResponse(
+                generation_type="TEXT_TO_IMAGE",
+                prompt=detail.task.prompt,
+                size_preset=detail.task.size_preset,
+            )
+            reference_download_url = None
         return _task_response(
             TaskResponse(
                 **response.model_dump(),
                 attempts=[TaskAttemptResponse.from_model(attempt) for attempt in attempts],
                 result=result,
                 retry_task_id=retry_task_id,
+                input_summary=input_summary,
+                reference_asset_id=detail.task.reference_asset_id,
+                reference_sha256=detail.task.reference_sha256,
+                reference_download_url=reference_download_url,
+                provider_profile=detail.task.provider_profile,
+                provider_name=detail.task.provider_name,
+                model_name=detail.task.model_name,
+                capability_version=detail.task.capability_version,
+                policy_snapshot=detail.task.policy_snapshot,
             ),
             [TaskEventResponse.from_record(event) for event in detail.events],
         )
@@ -581,36 +634,7 @@ def create_app(
     ) -> JSONResponse:
         if not idempotency_key:
             raise ApiError(400, "IDEMPOTENCY_KEY_REQUIRED", "Idempotency-Key is required")
-        source = get_task_detail.execute(task_id)
-        result = create_task.execute(
-            CreateTaskRequest(
-                prompt=source.task.prompt,
-                size_preset=source.task.size_preset,
-                execution_profile=source.task.execution_profile,
-                generation_type=source.task.generation_type,
-                reference_asset_id=source.task.reference_asset_id,
-                reference_sha256=source.task.reference_sha256,
-            ),
-            idempotency_key,
-            retried_from_task_id=task_id,
-            provider_snapshot=ProviderTaskSnapshot(
-                profile=source.task.provider_profile,
-                provider_name=source.task.provider_name,
-                model_name=source.task.model_name,
-                capability_version=source.task.capability_version,
-            ),
-            policy=TaskPolicy(
-                max_attempts=source.task.max_attempts,
-                policy_version=source.task.policy_version,
-                deadline_seconds=int(
-                    source.task.policy_snapshot.get(
-                        "deadline_seconds",
-                        (source.task.deadline_at - source.task.created_at).total_seconds(),
-                    )
-                ),
-            ),
-            policy_snapshot=source.task.policy_snapshot,
-        )
+        result = create_task.retry(task_id, idempotency_key)
         summary = TaskSummaryResponse.from_record(result.task)
         return JSONResponse(
             status_code=200 if result.idempotency_replayed else 201,
@@ -625,8 +649,14 @@ def create_app(
         limit: int = Query(default=20, ge=1, le=ListTasks.MAX_LIMIT),
         cursor: str | None = None,
         status: TaskStatus | None = None,
+        generation_type: GenerationType | None = None,
     ) -> TaskListResponse:
-        page = list_tasks.execute(limit=limit, cursor=cursor, status=status)
+        page = list_tasks.execute(
+            limit=limit,
+            cursor=cursor,
+            status=status,
+            generation_type=generation_type,
+        )
         task_ids = [task.id for task in page.items]
         with factory() as session:
             assets = list(
@@ -637,15 +667,11 @@ def create_app(
                     )
                 )
             )
-        thumbnails = {
-            asset.task_id: f"/api/v1/assets/{asset.id}/download" for asset in assets
-        }
+        thumbnails = {asset.task_id: f"/api/v1/assets/{asset.id}/download" for asset in assets}
         return TaskListResponse(
             items=[
                 TaskSummaryResponse(
-                    **TaskSummaryResponse.from_record(task).model_dump(
-                        exclude={"thumbnail_url"}
-                    ),
+                    **TaskSummaryResponse.from_record(task).model_dump(exclude={"thumbnail_url"}),
                     thumbnail_url=thumbnails.get(task.id),
                 )
                 for task in page.items

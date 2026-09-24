@@ -4,6 +4,57 @@
  */
 
 export interface paths {
+    "/api/v1/assets": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Upload Reference Asset */
+        post: operations["upload_reference_asset_api_v1_assets_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/assets/{asset_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Reference Asset */
+        get: operations["get_reference_asset_api_v1_assets__asset_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/assets/{asset_id}/download": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Download Asset */
+        get: operations["download_asset_api_v1_assets__asset_id__download_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/tasks": {
         parameters: {
             query?: never;
@@ -73,23 +124,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/assets/{asset_id}/download": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Download Asset */
-        get: operations["download_asset_api_v1_assets__asset_id__download_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/api/v1/health/live": {
         parameters: {
             query?: never;
@@ -141,17 +175,34 @@ export interface components {
         CreateTaskBody: {
             /** Prompt */
             prompt: string;
+            /** @default TEXT_TO_IMAGE */
+            generation_type?: components["schemas"]["GenerationType"];
+            /** Size Preset */
+            size_preset?: string | null;
+            /** Reference Asset Id */
+            reference_asset_id?: string | null;
         };
         /** DemoCreateTaskBody */
         DemoCreateTaskBody: {
             /** Prompt */
             prompt: string;
+            /** @default TEXT_TO_IMAGE */
+            generation_type?: components["schemas"]["GenerationType"];
+            /** Size Preset */
+            size_preset?: string | null;
+            /** Reference Asset Id */
+            reference_asset_id?: string | null;
             scenario: components["schemas"]["MockScenario"];
         };
         /** ErrorResponse */
         ErrorResponse: {
             error: components["schemas"]["ApiErrorDetail"];
         };
+        /**
+         * GenerationType
+         * @enum {string}
+         */
+        GenerationType: "TEXT_TO_IMAGE" | "IMAGE_TO_IMAGE";
         /** HTTPValidationError */
         HTTPValidationError: {
             /** Detail */
@@ -162,11 +213,61 @@ export interface components {
             /** Status */
             status: string;
         };
+        /** ImageToImageInputResponse */
+        ImageToImageInputResponse: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            generation_type: "IMAGE_TO_IMAGE";
+            /** Prompt */
+            prompt: string;
+            /** Size Preset */
+            size_preset: string;
+            /**
+             * Reference Asset Id
+             * Format: uuid
+             */
+            reference_asset_id: string;
+            /** Reference Sha256 */
+            reference_sha256: string;
+        };
         /**
          * MockScenario
          * @enum {string}
          */
-        MockScenario: "success" | "transient_then_success" | "rate_limited" | "timeout" | "permanent_failure";
+        MockScenario: "success" | "long_running_success" | "transient_then_success" | "rate_limited" | "timeout" | "permanent_failure";
+        /** ReferenceAssetResponse */
+        ReferenceAssetResponse: {
+            /**
+             * Asset Id
+             * Format: uuid
+             */
+            asset_id: string;
+            status: components["schemas"]["ReferenceAssetStatus"];
+            /** Content Type */
+            content_type: string | null;
+            /** Width */
+            width: number | null;
+            /** Height */
+            height: number | null;
+            /** Size Bytes */
+            size_bytes: number | null;
+            /** Sha256 */
+            sha256: string | null;
+            /** Download Url */
+            download_url: string;
+            /**
+             * Idempotency Replayed
+             * @default false
+             */
+            idempotency_replayed?: boolean;
+        };
+        /**
+         * ReferenceAssetStatus
+         * @enum {string}
+         */
+        ReferenceAssetStatus: "STAGING" | "READY" | "FAILED" | "DELETE_PENDING" | "DELETED";
         /** TaskAssetResponse */
         TaskAssetResponse: {
             /**
@@ -180,6 +281,10 @@ export interface components {
             content_type: string;
             /** Size Bytes */
             size_bytes: number;
+            /** Width */
+            width?: number | null;
+            /** Height */
+            height?: number | null;
             /** Sha256 */
             sha256: string;
             /** Download Url */
@@ -243,6 +348,7 @@ export interface components {
             prompt: string;
             /** Size Preset */
             size_preset: string;
+            generation_type?: components["schemas"]["GenerationType"] | null;
             status: components["schemas"]["TaskStatus"];
             /** Max Attempts */
             max_attempts: number;
@@ -279,20 +385,40 @@ export interface components {
              * Idempotency Replayed
              * @default false
              */
-            idempotency_replayed: boolean;
+            idempotency_replayed?: boolean;
             /**
              * Events
              * @default []
              */
-            events: components["schemas"]["TaskEventResponse"][];
+            events?: components["schemas"]["TaskEventResponse"][];
             /**
              * Attempts
              * @default []
              */
-            attempts: components["schemas"]["TaskAttemptResponse"][];
+            attempts?: components["schemas"]["TaskAttemptResponse"][];
             result?: components["schemas"]["TaskAssetResponse"] | null;
             /** Retry Task Id */
             retry_task_id?: string | null;
+            /** Input Summary */
+            input_summary?: (components["schemas"]["TextToImageInputResponse"] | components["schemas"]["ImageToImageInputResponse"]) | null;
+            /** Reference Asset Id */
+            reference_asset_id?: string | null;
+            /** Reference Sha256 */
+            reference_sha256?: string | null;
+            /** Reference Download Url */
+            reference_download_url?: string | null;
+            /** Provider Profile */
+            provider_profile?: string | null;
+            /** Provider Name */
+            provider_name?: string | null;
+            /** Model Name */
+            model_name?: string | null;
+            /** Capability Version */
+            capability_version?: string | null;
+            /** Policy Snapshot */
+            policy_snapshot?: {
+                [key: string]: unknown;
+            } | null;
         };
         /**
          * TaskStatus
@@ -310,6 +436,7 @@ export interface components {
             prompt: string;
             /** Size Preset */
             size_preset: string;
+            generation_type?: components["schemas"]["GenerationType"] | null;
             status: components["schemas"]["TaskStatus"];
             /** Max Attempts */
             max_attempts: number;
@@ -343,6 +470,18 @@ export interface components {
             /** Thumbnail Url */
             thumbnail_url?: string | null;
         };
+        /** TextToImageInputResponse */
+        TextToImageInputResponse: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            generation_type: "TEXT_TO_IMAGE";
+            /** Prompt */
+            prompt: string;
+            /** Size Preset */
+            size_preset: string;
+        };
         /** ValidationError */
         ValidationError: {
             /** Location */
@@ -365,12 +504,106 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    upload_reference_asset_api_v1_assets_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "Idempotency-Key"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReferenceAssetResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_reference_asset_api_v1_assets__asset_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                asset_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReferenceAssetResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    download_asset_api_v1_assets__asset_id__download_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                asset_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     list_tasks_route_api_v1_tasks_get: {
         parameters: {
             query?: {
                 limit?: number;
                 cursor?: string | null;
                 status?: components["schemas"]["TaskStatus"] | null;
+                generation_type?: components["schemas"]["GenerationType"] | null;
             };
             header?: never;
             path?: never;
@@ -546,37 +779,6 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["TaskResponse"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    download_asset_api_v1_assets__asset_id__download_get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                asset_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
                 };
             };
             /** @description Validation Error */

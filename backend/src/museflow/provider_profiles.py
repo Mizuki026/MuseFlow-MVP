@@ -4,11 +4,11 @@ import os
 from dataclasses import dataclass
 from types import MappingProxyType
 
-from museflow.tasks.domain import GenerationType
+from museflow.tasks.domain import DomainErrorCode, DomainValidationError, GenerationType
 
 
 class ProviderProfileUnavailableError(RuntimeError):
-    """The requested task profile is not supported by this deployment."""
+    """A frozen or configured profile cannot run in this deployment."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -18,9 +18,15 @@ class ProviderProfile:
     model_name: str
     capability_version: str
     generation_types: frozenset[GenerationType]
+    size_presets: frozenset[str]
+    input_content_types: frozenset[str]
+    max_reference_bytes: int | None
+    adapter_available: bool
 
 
 TEXT_TO_IMAGE = frozenset({GenerationType.TEXT_TO_IMAGE})
+IMAGE_GENERATION = frozenset(GenerationType)
+MOCK_IMAGE_FORMATS = frozenset({"image/png", "image/jpeg", "image/webp"})
 PROVIDER_PROFILES = MappingProxyType(
     {
         "mock-text-to-image-v1": ProviderProfile(
@@ -29,6 +35,21 @@ PROVIDER_PROFILES = MappingProxyType(
             model_name="mock-deterministic-image",
             capability_version="text-to-image-v1",
             generation_types=TEXT_TO_IMAGE,
+            size_presets=frozenset({"1280*1280"}),
+            input_content_types=frozenset(),
+            max_reference_bytes=None,
+            adapter_available=True,
+        ),
+        "mock-image-generation-v2": ProviderProfile(
+            profile_id="mock-image-generation-v2",
+            provider_name="mock",
+            model_name="mock-deterministic-image",
+            capability_version="image-generation-v2",
+            generation_types=IMAGE_GENERATION,
+            size_presets=frozenset({"1280*1280"}),
+            input_content_types=MOCK_IMAGE_FORMATS,
+            max_reference_bytes=6_000_000,
+            adapter_available=True,
         ),
         "dashscope-wan2.6-t2i-cn-beijing-v1": ProviderProfile(
             profile_id="dashscope-wan2.6-t2i-cn-beijing-v1",
@@ -36,11 +57,24 @@ PROVIDER_PROFILES = MappingProxyType(
             model_name="wan2.6-t2i",
             capability_version="text-to-image-v1",
             generation_types=TEXT_TO_IMAGE,
+            size_presets=frozenset({"1280*1280"}),
+            input_content_types=frozenset(),
+            max_reference_bytes=None,
+            adapter_available=True,
         ),
     }
 )
-_PROFILE_BY_PROVIDER = MappingProxyType(
-    {profile.provider_name: profile for profile in PROVIDER_PROFILES.values()}
+_PROFILE_BY_PROVIDER_AND_TYPE = MappingProxyType(
+    {
+        ("mock", GenerationType.TEXT_TO_IMAGE): PROVIDER_PROFILES["mock-text-to-image-v1"],
+        ("mock", GenerationType.IMAGE_TO_IMAGE): PROVIDER_PROFILES["mock-image-generation-v2"],
+        ("dashscope", GenerationType.TEXT_TO_IMAGE): PROVIDER_PROFILES[
+            "dashscope-wan2.6-t2i-cn-beijing-v1"
+        ],
+        ("dashscope", GenerationType.IMAGE_TO_IMAGE): PROVIDER_PROFILES[
+            "dashscope-wan2.6-t2i-cn-beijing-v1"
+        ],
+    }
 )
 
 LEGACY_PROVIDER_PROFILE = "legacy-unfrozen-v1"
@@ -53,14 +87,37 @@ def profile_for_id(profile_id: str) -> ProviderProfile | None:
     return PROVIDER_PROFILES.get(profile_id)
 
 
-def selected_text_to_image_profile() -> ProviderProfile:
+def configured_profile(generation_type: GenerationType) -> ProviderProfile:
     provider_name = os.environ.get("MUSEFLOW_PROVIDER", "mock").lower()
-    profile = _PROFILE_BY_PROVIDER.get(provider_name)
-    if profile is None or GenerationType.TEXT_TO_IMAGE not in profile.generation_types:
+    profile = _PROFILE_BY_PROVIDER_AND_TYPE.get((provider_name, generation_type))
+    if profile is None:
         raise ProviderProfileUnavailableError("configured provider profile is unavailable")
+    return profile
+
+
+def require_profile_capability(
+    profile: ProviderProfile, generation_type: GenerationType, size_preset: str
+) -> None:
+    if generation_type not in profile.generation_types or size_preset not in profile.size_presets:
+        raise DomainValidationError(
+            DomainErrorCode.PROVIDER_CAPABILITY_UNSUPPORTED,
+            "the selected provider profile does not support this generation request",
+        )
+
+
+def require_profile_available(profile: ProviderProfile) -> None:
+    if not profile.adapter_available:
+        raise ProviderProfileUnavailableError("provider adapter is unavailable in this deployment")
     if profile.provider_name == "dashscope":
         api_key = os.environ.get("DASHSCOPE_API_KEY")
         api_host = os.environ.get("DASHSCOPE_API_HOST")
         if not api_key or not api_host or not api_host.strip():
             raise ProviderProfileUnavailableError("configured provider profile is unavailable")
+
+
+def selected_text_to_image_profile() -> ProviderProfile:
+    """Compatibility helper for existing text-to-image callers."""
+    profile = configured_profile(GenerationType.TEXT_TO_IMAGE)
+    require_profile_capability(profile, GenerationType.TEXT_TO_IMAGE, "1280*1280")
+    require_profile_available(profile)
     return profile

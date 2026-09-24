@@ -1,28 +1,47 @@
 from __future__ import annotations
 
+import hashlib
+import io
 import os
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 import pytest
+from PIL import Image
 from sqlalchemy import delete, select
 
 from museflow.assets import StoredAsset, candidate_object_key, result_identity
 from museflow.db.models import (
     GenerationTaskModel,
     OutboxMessageModel,
+    ReferenceAssetModel,
     ResultAssetModel,
     TaskEventModel,
 )
 from museflow.db.session import create_session_factory
+from museflow.provider_profiles import ProviderProfileUnavailableError
 from museflow.providers import (
+    GenerationRequest,
     LeaseChecker,
     MockProvider,
+    MockScenario,
     PermanentProviderError,
     TransientProviderError,
 )
+from museflow.reference_assets.access import ReferenceAssetReader
+from museflow.reference_assets.blob_store import (
+    BlobMetadata,
+    BlobNotFoundError,
+    BlobStoreUnavailable,
+)
 from museflow.tasks.application import CreateTask, ManualRetryNotAllowedError
-from museflow.tasks.domain import CreateTaskRequest, TaskPolicy, TaskStatus
+from museflow.tasks.domain import (
+    CreateTaskRequest,
+    GenerationType,
+    ReferenceAssetStatus,
+    TaskPolicy,
+    TaskStatus,
+)
 from museflow.tasks.execution import ExecuteGenerationAttempt
 from museflow.tasks.execution_models import GenerationAttemptModel
 from museflow.tasks.execution_semantics import AttemptPhase
@@ -129,7 +148,7 @@ def test_expired_worker_token_cannot_commit_after_takeover(isolated_session_fact
         new_claim = execute._claim(task_id)
         assert new_claim is not None
         result = provider.generate(
-            old_claim.request,
+            GenerationRequest(old_claim.input.prompt, old_claim.input.size_preset),
             request_key=old_claim.provider_request_key,
             remote_request_id=None,
         )
@@ -171,6 +190,405 @@ def test_manual_retry_creates_one_linear_child(isolated_session_factory, error_c
             )
     finally:
         _cleanup(isolated_session_factory, child.task.id if "child" in locals() else task_id)
+        _cleanup(isolated_session_factory, task_id)
+
+
+class FlakyReferenceBlobStore:
+    def __init__(
+        self,
+        content: bytes,
+        sha256: str,
+        *,
+        fail_gets: int = 0,
+        missing: bool = False,
+        tampered: bool = False,
+    ) -> None:
+        self.content = content
+        self.sha256 = sha256
+        self.fail_gets = fail_gets
+        self.missing = missing
+        self.tampered = tampered
+        self.get_calls = 0
+
+    def stat(self, object_key: str) -> BlobMetadata:
+        del object_key
+        if self.missing:
+            raise BlobNotFoundError("injected missing reference object")
+        return BlobMetadata(len(self.content), "image/png", self.sha256)
+
+    def get(self, object_key: str, *, max_bytes: int) -> bytes:
+        del object_key
+        self.get_calls += 1
+        if self.get_calls <= self.fail_gets:
+            raise BlobStoreUnavailable("injected reference read outage")
+        assert len(self.content) <= max_bytes
+        if self.tampered:
+            changed = bytearray(self.content)
+            changed[-10] ^= 1
+            return bytes(changed)
+        return self.content
+
+
+def _create_image_to_image_task(factory, clock: MutableClock) -> tuple[UUID, UUID, bytes, str]:
+    image = io.BytesIO()
+    Image.new("RGB", (512, 512), (46, 107, 166)).save(image, format="PNG")
+    content = image.getvalue()
+    digest = hashlib.sha256(content).hexdigest()
+    asset_id = uuid4()
+    now = clock()
+    with factory.begin() as session:
+        session.add(
+            ReferenceAssetModel(
+                id=asset_id,
+                idempotency_key=f"i2i-execution-{asset_id}",
+                request_fingerprint=hashlib.sha256(str(asset_id).encode()).hexdigest(),
+                status=ReferenceAssetStatus.READY.value,
+                object_key=f"references/{asset_id}.png",
+                content_type="image/png",
+                size_bytes=len(content),
+                width=512,
+                height=512,
+                sha256=digest,
+                created_at=now,
+                ready_at=now,
+            )
+        )
+    task_id = CreateTask(factory, clock=clock).execute(
+        CreateTaskRequest(
+            prompt="image input recovery",
+            generation_type=GenerationType.IMAGE_TO_IMAGE,
+            reference_asset_id=asset_id,
+        ),
+        f"i2i-execution-{uuid4()}",
+    ).task.id
+    return task_id, asset_id, content, digest
+
+
+def _cleanup_image_to_image_task(factory, task_id: UUID, asset_id: UUID) -> None:
+    with factory.begin() as session:
+        session.execute(
+            delete(OutboxMessageModel).where(OutboxMessageModel.aggregate_id == task_id)
+        )
+        session.execute(delete(TaskEventModel).where(TaskEventModel.task_id == task_id))
+        session.execute(
+            delete(GenerationAttemptModel).where(GenerationAttemptModel.task_id == task_id)
+        )
+        session.execute(delete(GenerationTaskModel).where(GenerationTaskModel.id == task_id))
+        session.execute(delete(ReferenceAssetModel).where(ReferenceAssetModel.id == asset_id))
+
+
+def test_image_input_store_outage_recovers_same_attempt(isolated_session_factory) -> None:
+    clock = _current_clock()
+    task_id, asset_id, content, digest = _create_image_to_image_task(
+        isolated_session_factory, clock
+    )
+    blob_store = FlakyReferenceBlobStore(content, digest, fail_gets=1)
+    reader = ReferenceAssetReader(isolated_session_factory, blob_store)
+    provider = MockProvider()
+    execute = ExecuteGenerationAttempt(
+        isolated_session_factory,
+        provider,
+        reference_reader=reader,
+        clock=clock,
+        lease_seconds=10,
+    )
+    try:
+        failed = execute.execute(task_id)
+        assert failed.failure_code == "INPUT_STORAGE_UNAVAILABLE"
+        with isolated_session_factory() as session:
+            first_attempt = session.scalar(
+                select(GenerationAttemptModel).where(GenerationAttemptModel.task_id == task_id)
+            )
+            task = session.get(GenerationTaskModel, task_id)
+        assert first_attempt is not None
+        assert first_attempt.sequence == 1
+        assert first_attempt.phase == AttemptPhase.INPUT_LOADING.value
+        assert first_attempt.status == "RUNNING"
+        assert task is not None and task.status == TaskStatus.RUNNING.value
+        assert provider.create_calls == 0
+
+        clock.now += timedelta(seconds=11)
+        assert RecoverExpiredLeases(isolated_session_factory, clock=clock).run_once() == 1
+        assert execute.execute(task_id).succeeded
+        with isolated_session_factory() as session:
+            attempts = list(
+                session.scalars(
+                    select(GenerationAttemptModel)
+                    .where(GenerationAttemptModel.task_id == task_id)
+                    .order_by(GenerationAttemptModel.sequence)
+                )
+            )
+            task = session.get(GenerationTaskModel, task_id)
+        assert task is not None and task.status == TaskStatus.SUCCEEDED.value
+        assert len(attempts) == 1 and attempts[0].sequence == 1
+        assert provider.create_calls == 1
+        assert provider.call_records[-1].reference_sha256 == digest
+    finally:
+        _cleanup_image_to_image_task(isolated_session_factory, task_id, asset_id)
+
+
+def test_image_provider_create_transient_uses_new_attempt(isolated_session_factory) -> None:
+    clock = _current_clock()
+    task_id, asset_id, content, digest = _create_image_to_image_task(
+        isolated_session_factory, clock
+    )
+    reader = ReferenceAssetReader(
+        isolated_session_factory, FlakyReferenceBlobStore(content, digest)
+    )
+    provider = MockProvider(failures=[TransientProviderError()])
+    execute = ExecuteGenerationAttempt(
+        isolated_session_factory,
+        provider,
+        reference_reader=reader,
+        clock=clock,
+        lease_seconds=10,
+        random_source=lambda: 0.0,
+    )
+    try:
+        failed = execute.execute(task_id)
+        assert failed.failure_code == "PROVIDER_UNAVAILABLE"
+        with isolated_session_factory() as session:
+            first_attempt = session.scalar(
+                select(GenerationAttemptModel).where(GenerationAttemptModel.task_id == task_id)
+            )
+            task = session.get(GenerationTaskModel, task_id)
+        assert first_attempt is not None
+        assert first_attempt.sequence == 1
+        assert first_attempt.phase == AttemptPhase.PROVIDER_SUBMITTING.value
+        assert first_attempt.status == "FAILED"
+        assert task is not None and task.status == TaskStatus.RETRY_WAIT.value
+        assert ScheduleDueRetries(isolated_session_factory, clock=clock).run_once() == 1
+
+        assert execute.execute(task_id).succeeded
+        with isolated_session_factory() as session:
+            attempts = list(
+                session.scalars(
+                    select(GenerationAttemptModel)
+                    .where(GenerationAttemptModel.task_id == task_id)
+                    .order_by(GenerationAttemptModel.sequence)
+                )
+            )
+            task = session.get(GenerationTaskModel, task_id)
+        assert task is not None and task.status == TaskStatus.SUCCEEDED.value
+        assert [attempt.sequence for attempt in attempts] == [1, 2]
+        assert provider.create_calls == 1
+        assert len(provider.call_records) == 2
+        assert all(record.reference_sha256 == digest for record in provider.call_records)
+    finally:
+        _cleanup_image_to_image_task(isolated_session_factory, task_id, asset_id)
+
+
+def test_image_mock_remote_failure_resumes_without_creating_again(
+    isolated_session_factory,
+) -> None:
+    clock = _current_clock()
+    task_id, asset_id, content, digest = _create_image_to_image_task(
+        isolated_session_factory, clock
+    )
+    reader = ReferenceAssetReader(
+        isolated_session_factory, FlakyReferenceBlobStore(content, digest)
+    )
+    provider = MockProvider(poll_failures=[TransientProviderError()])
+    execute = ExecuteGenerationAttempt(
+        isolated_session_factory,
+        provider,
+        reference_reader=reader,
+        clock=clock,
+        lease_seconds=10,
+    )
+    try:
+        first = execute.execute(task_id)
+        assert first.failure_code == "PROVIDER_UNAVAILABLE"
+        assert provider.create_calls == 1
+        assert provider.recovery_calls == 0
+
+        clock.now += timedelta(seconds=11)
+        assert RecoverExpiredLeases(isolated_session_factory, clock=clock).run_once() == 1
+        assert execute.execute(task_id).succeeded
+        with isolated_session_factory() as session:
+            attempts = list(
+                session.scalars(
+                    select(GenerationAttemptModel).where(
+                        GenerationAttemptModel.task_id == task_id
+                    )
+                )
+            )
+            task = session.get(GenerationTaskModel, task_id)
+        assert task is not None and task.status == TaskStatus.SUCCEEDED.value
+        assert len(attempts) == 1
+        assert attempts[0].sequence == 1
+        assert attempts[0].provider_request_id is not None
+        assert provider.create_calls == 1
+        assert provider.recovery_calls == 1
+        assert all(record.reference_sha256 == digest for record in provider.call_records)
+    finally:
+        _cleanup_image_to_image_task(isolated_session_factory, task_id, asset_id)
+
+
+def test_image_mock_permanent_failure_is_terminal(isolated_session_factory) -> None:
+    clock = _current_clock()
+    task_id, asset_id, content, digest = _create_image_to_image_task(
+        isolated_session_factory, clock
+    )
+    reader = ReferenceAssetReader(
+        isolated_session_factory, FlakyReferenceBlobStore(content, digest)
+    )
+    provider = MockProvider(scenario=MockScenario.PERMANENT_FAILURE)
+    execute = ExecuteGenerationAttempt(
+        isolated_session_factory, provider, reference_reader=reader, clock=clock
+    )
+    try:
+        outcome = execute.execute(task_id)
+        assert outcome.failure_code == "PROVIDER_REJECTED"
+        assert provider.create_calls == 1
+        with isolated_session_factory() as session:
+            task = session.get(GenerationTaskModel, task_id)
+            attempt = session.scalar(
+                select(GenerationAttemptModel).where(GenerationAttemptModel.task_id == task_id)
+            )
+        assert task is not None and task.status == TaskStatus.FAILED.value
+        assert attempt is not None
+        assert attempt.status == "FAILED"
+        assert attempt.provider_request_id is not None
+    finally:
+        _cleanup_image_to_image_task(isolated_session_factory, task_id, asset_id)
+
+
+@pytest.mark.parametrize(
+    ("blob_options", "error_code"),
+    [
+        ({"missing": True}, "INPUT_REFERENCE_OBJECT_MISSING"),
+        ({"tampered": True}, "INPUT_REFERENCE_INVALID"),
+    ],
+)
+def test_image_reference_damage_fails_closed(
+    isolated_session_factory, blob_options: dict[str, bool], error_code: str
+) -> None:
+    clock = _current_clock()
+    task_id, asset_id, content, digest = _create_image_to_image_task(
+        isolated_session_factory, clock
+    )
+    reader = ReferenceAssetReader(
+        isolated_session_factory, FlakyReferenceBlobStore(content, digest, **blob_options)
+    )
+    execute = ExecuteGenerationAttempt(
+        isolated_session_factory, MockProvider(), reference_reader=reader, clock=clock
+    )
+    try:
+        outcome = execute.execute(task_id)
+        assert outcome.failure_code == error_code
+        with isolated_session_factory() as session:
+            task = session.get(GenerationTaskModel, task_id)
+            attempt = session.scalar(
+                select(GenerationAttemptModel).where(GenerationAttemptModel.task_id == task_id)
+            )
+        assert task is not None and task.status == TaskStatus.FAILED.value
+        assert task.error_code == error_code
+        assert attempt is not None and attempt.status == "FAILED"
+    finally:
+        _cleanup_image_to_image_task(isolated_session_factory, task_id, asset_id)
+
+
+def test_image_to_image_manual_retry_copies_frozen_reference_and_provider_snapshots(
+    isolated_session_factory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MUSEFLOW_PROVIDER", "mock")
+    asset_id = uuid4()
+    now = datetime(2026, 9, 24, 12, 0, tzinfo=UTC)
+    with isolated_session_factory.begin() as session:
+        session.add(
+            ReferenceAssetModel(
+                id=asset_id,
+                idempotency_key=f"retry-reference-{asset_id}",
+                request_fingerprint="b" * 64,
+                status=ReferenceAssetStatus.READY.value,
+                object_key=f"references/{asset_id}/{'b' * 64}.png",
+                content_type="image/png",
+                size_bytes=512,
+                width=512,
+                height=512,
+                sha256="b" * 64,
+                created_at=now,
+                ready_at=now,
+            )
+        )
+    parent_id: UUID | None = None
+    child_id: UUID | None = None
+    try:
+        parent = CreateTask(isolated_session_factory).execute(
+            CreateTaskRequest(
+                prompt="retry this reference edit",
+                generation_type=GenerationType.IMAGE_TO_IMAGE,
+                reference_asset_id=asset_id,
+            ),
+            f"i2i-retry-parent-{uuid4()}",
+        )
+        parent_id = parent.task.id
+        with isolated_session_factory.begin() as session:
+            model = session.get(GenerationTaskModel, parent_id)
+            assert model is not None
+            model.status = TaskStatus.FAILED.value
+            model.error_code = "RETRY_EXHAUSTED"
+
+        create = CreateTask(isolated_session_factory)
+        child = create.retry(parent_id, f"i2i-retry-child-{uuid4()}")
+        replay = create.retry(parent_id, child.task.idempotency_key)
+        child_id = child.task.id
+
+        assert child.idempotency_replayed is False
+        assert replay.idempotency_replayed is True
+        assert replay.task.id == child.task.id
+        assert child.task.retried_from_task_id == parent_id
+        assert child.task.generation_type is GenerationType.IMAGE_TO_IMAGE
+        assert child.task.reference_asset_id == parent.task.reference_asset_id == asset_id
+        assert child.task.reference_sha256 == parent.task.reference_sha256 == "b" * 64
+        assert child.task.provider_profile == parent.task.provider_profile
+        assert child.task.provider_name == parent.task.provider_name
+        assert child.task.model_name == parent.task.model_name
+        assert child.task.capability_version == parent.task.capability_version
+        assert child.task.policy_snapshot == parent.task.policy_snapshot
+        with pytest.raises(ManualRetryNotAllowedError):
+            create.retry(parent_id, f"i2i-retry-fork-{uuid4()}")
+    finally:
+        task_ids = [task_id for task_id in (parent_id, child_id) if task_id is not None]
+        with isolated_session_factory.begin() as session:
+            session.execute(
+                delete(OutboxMessageModel).where(OutboxMessageModel.aggregate_id.in_(task_ids))
+            )
+            session.execute(delete(TaskEventModel).where(TaskEventModel.task_id.in_(task_ids)))
+            session.execute(
+                delete(GenerationAttemptModel).where(
+                    GenerationAttemptModel.task_id.in_(task_ids)
+                )
+            )
+            session.execute(delete(GenerationTaskModel).where(GenerationTaskModel.id.in_(task_ids)))
+            session.execute(delete(ReferenceAssetModel).where(ReferenceAssetModel.id == asset_id))
+
+
+def test_manual_retry_of_unknown_frozen_profile_fails_without_fallback(
+    isolated_session_factory,
+) -> None:
+    task_id = _create_task(isolated_session_factory, prompt="unknown frozen profile")
+    try:
+        with isolated_session_factory.begin() as session:
+            task = session.get(GenerationTaskModel, task_id)
+            assert task is not None
+            task.status = TaskStatus.FAILED.value
+            task.error_code = "RETRY_EXHAUSTED"
+            task.provider_profile = "legacy-unfrozen-v1"
+            task.provider_name = "legacy-unknown"
+            task.model_name = "legacy-unknown"
+            task.capability_version = "legacy-unknown"
+
+        with pytest.raises(ProviderProfileUnavailableError):
+            CreateTask(isolated_session_factory).retry(task_id, f"unknown-retry-{uuid4()}")
+        with isolated_session_factory() as session:
+            assert session.scalar(
+                select(GenerationTaskModel.id).where(
+                    GenerationTaskModel.retried_from_task_id == task_id
+                )
+            ) is None
+    finally:
         _cleanup(isolated_session_factory, task_id)
 
 

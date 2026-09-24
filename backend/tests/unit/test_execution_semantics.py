@@ -94,6 +94,22 @@ def test_recovery_resumes_persisted_phase_and_unknown_submission_has_no_resume_p
             False,
             FailureAction.RETRY_SAME_ATTEMPT,
         ),
+        (
+            FailureDomain.INPUT_LOADING,
+            True,
+            AttemptPhase.INPUT_LOADING,
+            False,
+            False,
+            FailureAction.RETRY_SAME_ATTEMPT,
+        ),
+        (
+            FailureDomain.PROVIDER_SUBMISSION,
+            True,
+            AttemptPhase.INPUT_LOADING,
+            False,
+            False,
+            FailureAction.CREATE_NEW_ATTEMPT,
+        ),
     ],
 )
 def test_failure_action_preserves_attempt_and_submission_boundaries(

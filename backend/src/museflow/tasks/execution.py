@@ -20,12 +20,22 @@ from museflow.assets import (
 from museflow.db.models import GenerationTaskModel, ResultAssetModel, TaskEventModel
 from museflow.providers import (
     GenerationProvider,
-    GenerationRequest,
     GenerationResult,
+    ImageToImageProviderInput,
     ProviderError,
+    ProviderGenerationRequest,
     ProviderSubmissionUnknownError,
+    TextToImageProviderInput,
 )
-from museflow.tasks.domain import RetryPolicy, TaskStatus
+from museflow.reference_assets.access import ReferenceAssetReader, ReferenceAssetReadError
+from museflow.tasks.domain import (
+    GenerationType,
+    ImageToImageInput,
+    RetryPolicy,
+    TaskInput,
+    TaskStatus,
+    TextToImageInput,
+)
 from museflow.tasks.execution_models import GenerationAttemptModel
 from museflow.tasks.execution_semantics import (
     AttemptPhase,
@@ -64,7 +74,8 @@ class ExecutionClaim:
     phase: AttemptPhase
     provider_request_key: str
     remote_request_id: str | None
-    request: GenerationRequest
+    input: TaskInput
+    deadline_at: datetime
     lease_settings: LeaseSettings
     retry_policy: RetryPolicy
 
@@ -87,6 +98,7 @@ class ExecuteGenerationAttempt:
         provider: GenerationProvider,
         *,
         asset_store: ResultAssetStore | None = None,
+        reference_reader: ReferenceAssetReader | None = None,
         clock: Callable[[], datetime] | None = None,
         lease_seconds: int | None = None,
         heartbeat_interval_seconds: float | None = None,
@@ -98,6 +110,7 @@ class ExecuteGenerationAttempt:
         self._session_factory = session_factory
         self._provider = provider
         self._asset_store = asset_store
+        self._reference_reader = reference_reader
         self._clock = clock or (lambda: datetime.now(UTC))
         self._lease_settings_override = lease_settings
         if lease_settings is None and (
@@ -117,14 +130,12 @@ class ExecuteGenerationAttempt:
         claim = self._claim(task_id)
         if claim is None:
             return ExecutionOutcome(task_id, None, executed=False, succeeded=False)
-        deadline_at = claim.request.deadline_at
-        assert deadline_at is not None
         guard = LeaseGuard(
             self._session_factory,
             task_id=claim.task_id,
             attempt_id=claim.attempt_id,
             execution_token=claim.execution_token,
-            deadline_at=deadline_at,
+            deadline_at=claim.deadline_at,
             settings=claim.lease_settings,
             clock=self._clock,
         )
@@ -135,11 +146,20 @@ class ExecuteGenerationAttempt:
                 if claim.phase is AttemptPhase.INPUT_LOADING:
                     self._set_phase(claim, AttemptPhase.INPUT_LOADING, guard)
 
+                try:
+                    provider_request = self._provider_request(claim, guard)
+                except ReferenceAssetReadError as error:
+                    return self._handle_failure(
+                        claim,
+                        guard,
+                        error,
+                        phase=AttemptPhase.INPUT_LOADING,
+                        remote_request_id=current_remote_id,
+                    )
+
                 def on_phase(phase: AttemptPhase) -> None:
                     nonlocal current_phase
-                    if tuple(AttemptPhase).index(phase) < tuple(AttemptPhase).index(
-                        current_phase
-                    ):
+                    if tuple(AttemptPhase).index(phase) < tuple(AttemptPhase).index(current_phase):
                         guard.require_ownership()
                         return
                     self._set_phase(claim, phase, guard)
@@ -153,7 +173,7 @@ class ExecuteGenerationAttempt:
 
                 try:
                     result = self._provider.generate(
-                        claim.request,
+                        provider_request,
                         request_key=claim.provider_request_key,
                         remote_request_id=claim.remote_request_id,
                         on_remote_request_id=on_remote_request_id,
@@ -209,9 +229,7 @@ class ExecuteGenerationAttempt:
                         return self._outcome(claim, succeeded=False)
                     if guard.state is LeaseState.DEADLINE_EXCEEDED:
                         self._mark_deadline(claim)
-                        return self._outcome(
-                            claim, succeeded=False, error_code="DEADLINE_EXCEEDED"
-                        )
+                        return self._outcome(claim, succeeded=False, error_code="DEADLINE_EXCEEDED")
                     self._record_result_storage_failure(claim)
                     logger.exception(
                         "result storage failed",
@@ -285,9 +303,7 @@ class ExecuteGenerationAttempt:
             raise RuntimeError("result asset store returned metadata for a different candidate")
         return stored
 
-    def _set_phase(
-        self, claim: ExecutionClaim, target: AttemptPhase, guard: LeaseGuard
-    ) -> None:
+    def _set_phase(self, claim: ExecutionClaim, target: AttemptPhase, guard: LeaseGuard) -> None:
         guard.require_ownership()
         now = self._clock()
         with self._session_factory.begin() as session:
@@ -377,9 +393,7 @@ class ExecuteGenerationAttempt:
                 latest_phase = self._stored_phase(latest.phase, latest.status)
                 has_remote_id = latest.provider_request_id is not None
                 if (
-                    next_phase_for_recovery(
-                        latest_phase, has_remote_request_id=has_remote_id
-                    )
+                    next_phase_for_recovery(latest_phase, has_remote_request_id=has_remote_id)
                     is None
                 ):
                     if submission_outcome_is_unknown(
@@ -450,14 +464,51 @@ class ExecuteGenerationAttempt:
                 phase=self._stored_phase(attempt.phase, attempt.status),
                 provider_request_key=attempt.provider_request_key,
                 remote_request_id=attempt.provider_request_id,
-                request=GenerationRequest(
-                    prompt=task.prompt,
-                    size_preset=task.size_preset,
-                    deadline_at=task.deadline_at,
+                input=(
+                    ImageToImageInput(
+                        prompt=task.prompt,
+                        size_preset=task.size_preset,
+                        reference_asset_id=task.reference_asset_id,
+                        reference_sha256=task.reference_sha256,
+                    )
+                    if GenerationType(task.generation_type) is GenerationType.IMAGE_TO_IMAGE
+                    and task.reference_asset_id is not None
+                    and task.reference_sha256 is not None
+                    else self._text_or_invalid_input(task)
                 ),
+                deadline_at=task.deadline_at,
                 lease_settings=lease_settings,
                 retry_policy=retry_policy,
             )
+
+    @staticmethod
+    def _text_or_invalid_input(task: GenerationTaskModel) -> TaskInput:
+        if GenerationType(task.generation_type) is not GenerationType.TEXT_TO_IMAGE:
+            raise ValueError("image-to-image task is missing its frozen reference snapshot")
+        return TextToImageInput(prompt=task.prompt, size_preset=task.size_preset)
+
+    def _provider_request(
+        self, claim: ExecutionClaim, guard: LeaseGuard
+    ) -> ProviderGenerationRequest:
+        if isinstance(claim.input, ImageToImageInput):
+            if self._reference_reader is None:
+                raise ReferenceAssetReadError("INPUT_REFERENCE_UNAVAILABLE", retryable=False)
+            reference = self._reference_reader.read_for_task(
+                claim.input.reference_asset_id,
+                expected_sha256=claim.input.reference_sha256,
+                ownership_guard=guard.require_ownership,
+            )
+            provider_input = ImageToImageProviderInput(
+                prompt=claim.input.prompt,
+                size_preset=claim.input.size_preset,
+                reference_image=reference,
+            )
+        else:
+            provider_input = TextToImageProviderInput(
+                prompt=claim.input.prompt,
+                size_preset=claim.input.size_preset,
+            )
+        return ProviderGenerationRequest(input=provider_input, deadline_at=claim.deadline_at)
 
     def _execution_policy(
         self, policy_snapshot: dict[str, object]
@@ -479,9 +530,7 @@ class ExecuteGenerationAttempt:
                 ),
             )
             retry_policy = RetryPolicy(
-                initial_delay_seconds=self._snapshot_number(
-                    retry_values, "initial_delay_seconds"
-                ),
+                initial_delay_seconds=self._snapshot_number(retry_values, "initial_delay_seconds"),
                 multiplier=self._snapshot_number(retry_values, "multiplier"),
                 max_delay_seconds=self._snapshot_number(retry_values, "max_delay_seconds"),
             )
@@ -520,8 +569,7 @@ class ExecuteGenerationAttempt:
     ) -> None:
         code = "PROVIDER_SUBMISSION_UNKNOWN"
         message = (
-            "provider may have accepted the creation request; "
-            "automatic resubmission is disabled"
+            "provider may have accepted the creation request; automatic resubmission is disabled"
         )
         attempt.status = "FAILED"
         attempt.error_code = code
@@ -725,6 +773,11 @@ class ExecuteGenerationAttempt:
             retryable = error.retryable
             submission_unknown = error.submission_state_unknown
             domain = classify_failure_domain(code, phase)
+        elif isinstance(error, ReferenceAssetReadError):
+            code = error.code
+            retryable = error.retryable
+            submission_unknown = False
+            domain = FailureDomain.INPUT_LOADING
         elif phase is AttemptPhase.PROVIDER_SUBMITTING and remote_request_id is None:
             unknown = ProviderSubmissionUnknownError()
             code = unknown.code
@@ -832,9 +885,7 @@ class ExecuteGenerationAttempt:
                 next_at = now + timedelta(seconds=delay)
             can_retry = can_schedule_new_attempt(
                 action=(
-                    FailureAction.CREATE_NEW_ATTEMPT
-                    if allow_new_attempt
-                    else FailureAction.FAIL
+                    FailureAction.CREATE_NEW_ATTEMPT if allow_new_attempt else FailureAction.FAIL
                 ),
                 attempts_used=claim.sequence,
                 max_attempts=task.max_attempts,
