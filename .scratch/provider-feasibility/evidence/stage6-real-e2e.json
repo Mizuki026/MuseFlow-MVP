@@ -1,0 +1,122 @@
+{
+  "git_commit": "d9e1809fe14bad85e3d19c13c82b3c494a4096cf",
+  "completed_at_utc": "2026-09-24T10:12:33.668377+00:00",
+  "profile": "dashscope-wan2.6-image-cn-beijing-edit",
+  "model": "wan2.6-image",
+  "capability_version": "official-doc-snapshot-2026-09-24",
+  "region": "cn-beijing",
+  "endpoint": "https://<redacted-workspace>.cn-beijing.maas.aliyuncs.com",
+  "create_post_count": 1,
+  "blocked_extra_create_post_count": 0,
+  "provider_http_requests": [
+    {
+      "method": "POST",
+      "request_body_bytes": "8756",
+      "http_status": 200
+    },
+    {
+      "method": "GET",
+      "http_status": 200
+    },
+    {
+      "method": "GET",
+      "http_status": 200
+    }
+  ],
+  "polling": [
+    {
+      "statuses": [
+        "RUNNING",
+        "SUCCEEDED"
+      ],
+      "http_statuses": [
+        200,
+        200
+      ]
+    }
+  ],
+  "task_id_sha256_12": "a454de457b5c",
+  "task_status": "SUCCEEDED",
+  "elapsed_seconds_from_create_through_verification_and_cleanup": 19.806,
+  "input": {
+    "format": "PNG",
+    "mode": "RGB",
+    "width": 512,
+    "height": 512,
+    "size_bytes": 6281,
+    "sha256": "431b2b3dafc9faee53203f1b714c9bcd28c85cd63cf740cd68050273177cac44",
+    "prompt": "Using this synthetic geometric landscape as reference, create a polished blue-hour watercolor landscape with layered hills, a still lake, and soft cloud bands.",
+    "prompt_characters": 159
+  },
+  "request": {
+    "body_bytes": 8756,
+    "output_count": 1,
+    "size": "1K",
+    "enable_interleave": false,
+    "prompt_extend": false,
+    "watermark": false,
+    "automatic_retries": false,
+    "unknown_submission_behavior": "do_not_resend",
+    "maximum_estimated_cost_cny": 0.2
+  },
+  "output": {
+    "content_type": "image/png",
+    "format": "PNG",
+    "width": 1280,
+    "height": 1280,
+    "size_bytes": 2796294,
+    "sha256": "d98566f984f173fd5b68290932ba374c3282b280f7aefaeac8523485c0ee2d39",
+    "db_sha256_matches_minio": true,
+    "provider_result_metadata_sha256_matches_database": true,
+    "provider_format": "PNG",
+    "provider_content_type": "image/png",
+    "provider_width": 1280,
+    "provider_height": 1280,
+    "provider_size_bytes": 2796294,
+    "provider_frame_count": 1,
+    "provider_mode": "RGB",
+    "result_host_sha256_12": "0bd1575e39cb",
+    "redirect_count": 0,
+    "provider_task_status_sequence": [
+      "RUNNING",
+      "SUCCEEDED"
+    ],
+    "provider_poll_http_statuses": [
+      200,
+      200
+    ],
+    "result_download_http_status": 200
+  },
+  "attempt": {
+    "count": 1,
+    "status": "SUCCEEDED",
+    "phase": "COMPLETED",
+    "remote_task_id_sha256_12": "a86cbdefbce1",
+    "recovery": false
+  },
+  "access": {
+    "museflow_short_lived_redirect_http_status": 307,
+    "signed_minio_download_http_status": 200,
+    "unsigned_minio_access_http_status": 403
+  },
+  "result_host_allowlist_match": true,
+  "pinned_result_connection_classifications": [
+    {
+      "family": 4,
+      "global_public": true,
+      "private": false,
+      "loopback": false,
+      "link_local": false
+    }
+  ],
+  "result_dns_answer_counts": [
+    1
+  ],
+  "isolated_database": "museflow-stage6-real PostgreSQL; cleaned after verification",
+  "isolated_bucket": "museflow-stage6-real; objects deleted after verification",
+  "images_retained_locally": false,
+  "billing_console_checked": false,
+  "actual_billing_amount": "not checked",
+  "failure_code": null,
+  "cleanup_errors": []
+}

@@ -555,15 +555,15 @@
 
 如产品必须支持无状态未知窗口自动恢复、未授权重复请求也绝不可能产生重复费用、任意上传尺寸或 Provider 保证模型固定版本，则本 Conditional GO 不适用，应改选具有对应合同保障的 Provider，或收缩产品承诺。
 
-## 19. 第 6 个窗口：正式 Adapter 与非收费端到端验收（2026-09-24）
+## 19. 第 6 个窗口：正式 Adapter、非收费回归与单次真实端到端验收（2026-09-24）
 
-本节记录阶段 6 实施及新验证，**不改写**第 18 节阶段 0 的探针、授权和真实调用历史。第 18.4–18.5 节对“生产 SafeArtifactFetcher 尚未实现”的表述是阶段 0 当时状态；阶段 6 已完成下述实现，但真实 Provider 系统 E2E 仍待新的单次授权。
+本节记录阶段 6 实施及新验证，**不改写**第 18 节阶段 0 的探针、授权和真实调用历史。第 18.4–18.5 节对“生产 SafeArtifactFetcher 尚未实现”的表述是阶段 0 当时状态；阶段 6 的真实 Provider 系统 E2E 结果见 19.4 节。
 
 ### 19.1 官方协议复核
 
 重新核对 [Wan 图像生成 API 文档](https://help.aliyun.com/en/model-studio/wan-image-generation-api-reference)、[Wan2.6 Image 模型与计费](https://help.aliyun.com/zh/model-studio/wan2-6-image) 和[限流建议](https://help.aliyun.com/en/model-studio/rate-limiting-best-practices)。文档仍支持阶段 0 冻结的 profile：北京 Workspace 异步创建 endpoint、`X-DashScope-Async: enable`、查询 `/api/v1/tasks/{task_id}`、`PENDING/RUNNING/SUCCEEDED/FAILED` 及终态 `CANCELED/UNKNOWN`；轮询仍建议按约 10 秒间隔。返回 URL 在示例中出现过北京 OSS host，但官方没有承诺结果 host 永久固定，因此代码只允许阶段 0 脱敏证据实际命中的一个精确 host，不因官方示例扩展 allowlist，重定向设为 0。
 
-北京 `wan2.6-image` 单张输出标价仍为 ¥0.20。阶段 6 没有发出真实 Provider 请求，因此没有真实任务 ID、输出图或账单记录；此处价格只用于后续单次授权上限说明，不代表发生扣费。
+北京 `wan2.6-image` 单张输出标价为 ¥0.20。阶段 6 在单次授权后实际创建一张图；最高费用按 ¥0.20 记录。未查询账单控制台，因此不对实际扣款或免费额度状态作结论。
 
 ### 19.2 实现与当前安全边界
 
@@ -574,22 +574,27 @@
 - 通用 fetcher 对每跳重新校验 HTTPS、端口、userinfo、精确 allowlist、DNS/IP 和循环；协议 profile 设 `max_redirects=0`。流式读取前检查 `Content-Length`，实际累计字节始终受 20 MiB 限制，禁止压缩响应，deadline/ownership 在读取时持续检查，失败路径关闭 stream/client。输出只接受 PNG/RGB/单帧/无 alpha，最大边 1,440、总像素≤1,440²；验证 Content-Type、PNG 签名、Pillow `verify()` 和重新打开后的完整 `load()`，计算实际 SHA-256。Result URL 不进入数据库或 API 响应，Adapter 不接触 ORM/MinIO。
 - 稳定错误码区分配置、请求/内容拒绝、认证/权限、配额和可退避的 RateQuota/BurstRate、Provider 5xx/网络、创建未知、轮询协议、结果 URL、安全 DNS、下载大小/MIME/解码与 deadline；429 allocation/account quota 是永久账号阻断，不映射为普通可退避限流。
 
-### 19.3 非收费验证记录
+### 19.3 实施与验证记录
 
 | 验证 | 结果 |
 | --- | --- |
 | 修改前直接相关基线 | `39 passed, 1 skipped`；Starlette/httpx 与 AnyIO 两条既有弃用警告。 |
 | SafeArtifactFetcher、Adapter、profile 测试 | `105 passed`；全 unit suite `214 passed`（ownership/deadline、严格结果结构、多个选择项、控制字符 URL 与空白凭据用例均纳入）。 |
 | 独立模拟 Provider 全链路 | `1 passed`：隔离 PostgreSQL、Redis、MinIO；正式 Scheduler iteration；Celery Worker test runner；API 上传/任务创建/outbox、单次模拟 POST、远端 ID、轮询、受控安全下载、不可变候选、DB/MinIO SHA 与短期签名访问。Provider API 和 ArtifactFetcher transport 使用受控模拟，无网络 Provider POST。 |
+| 单次真实 Provider 全链路 | `SUCCEEDED`：1 次 POST HTTP 200、2 次 GET HTTP 200；状态 `RUNNING → SUCCEEDED`，从创建 POST 到访问核验与清理共 19.806 秒，attempt `1/SUCCEEDED/COMPLETED`，无恢复/重发。隔离 PostgreSQL/Redis/MinIO + 正式 Scheduler iteration/Celery Worker test runner。 |
+| 真实图像与访问核对 | 输入 PNG/RGB 512×512、6,281 bytes，SHA-256 `431b2b3dafc9faee53203f1b714c9bcd28c85cd63cf740cd68050273177cac44`；输出 PNG/RGB 单帧 1280×1280、2,796,294 bytes，SHA-256 `d98566f984f173fd5b68290932ba374c3282b280f7aefaeac8523485c0ee2d39`。数据库 SHA 与 MinIO 下载字节 SHA 一致；短期入口 307、签名下载 200、去签名访问 403；pinned IPv4 为公网，host 摘要匹配 allowlist，redirect 0。 |
 | 阶段 5 完整 Compose 文生图及 Mock 图生图 | `2 passed`；独立 Compose 的 PostgreSQL、Redis、Scheduler、generation Worker、MinIO 均实际运行。 |
 | PostgreSQL/MinIO 发布 fencing、MinIO 对象及参考上传集成 | `5 passed`。 |
 | 短 lease 的真实 Redis Worker / heartbeat | `1 passed`；实际 Worker 运行超过 2 秒 lease；因该历史探针主动派发 outbox，测试期间暂停 Scheduler 避免其抢先消费。maintenance Scheduler→Worker `1 passed`，并由模拟 E2E 单独覆盖正式调度迭代。 |
 | 完整后端测试 | 隔离服务下 `292 passed, 9 skipped, 2 warnings`；模拟 DashScope E2E 门禁已启用，其余 9 个 gated 测试按对应服务设置另行运行，详见最终技术方案阶段 6 验证记录。 |
+| 真实请求后相关回归 | 聚焦单测 + 模拟 Provider E2E `106 passed, 2 warnings`。 |
 | Ruff / Pyright / compileall | 本阶段涉及文件 Ruff 全绿；Pyright `0 errors, 0 warnings, 0 informations`；compileall 通过。全仓 Ruff 仍只有 `migrations/versions/0006_compatibility_constraints.py:45-47` 的 3 条已知历史 E501。 |
 | Alembic / OpenAPI / 前端 / Compose | 隔离 PostgreSQL head `0007_reference_operation_leases`，`alembic check` 无新操作；OpenAPI 与已提交 JSON 对象一致；前端 typecheck、lint、17 个 Vitest、build 通过；Compose config 与 backend API/Scheduler/worker/maintenance-worker 镜像构建通过。 |
 
-所有容器和卷使用独立 Compose project `museflow-stage6-simulation` 及独立命名 volume/network/bucket；默认 Compose 项目/数据卷未连接、迁移或删除。完整 pytest 执行时暂停后台消费者，避免与手动执行型集成测试争抢 outbox。2 条弃用警告与本阶段无关。
+模拟和真实验收分别使用独立 Compose project `museflow-stage6-simulation`、`museflow-stage6-real` 及独立命名 volume/network/bucket。真实验收后参考图、结果图和测试业务记录清除，两个隔离项目及 volumes 均已清理；默认 Compose 项目/数据卷未连接、迁移或删除。完整 pytest 执行时暂停后台消费者，避免与手动执行型集成测试争抢 outbox。2 条弃用警告与本阶段无关。
 
-### 19.4 阶段 6 状态与门禁
+### 19.4 真实 E2E 证据与阶段 6 状态
 
-**阶段 6：有条件完成。** SafeArtifactFetcher、正式 Adapter/profile、模拟 Provider 的真实基础设施端到端和无收费回归已实现并提交，代码提交为 `d9e1809fe14bad85e3d19c13c82b3c494a4096cf`。未取得新的真实调用授权：真实 POST 数 `0`，真实任务/状态轨迹/数据库与 MinIO 输出 SHA/匿名访问/短期访问证据均未验证，实际账单没有本窗口真实调用记录。下一步必须先完成提示词中列出的脱敏授权前清单，再等待用户逐次明确授权；未授权不得发送创建请求。模型 alias 稳定性和 8,100,000-byte request guard 仍分别属于 Provider 未承诺与本地限制；外部 exactly-once 仍不保证。
+脱敏证据：[stage6-real-e2e.json](../../.scratch/provider-feasibility/evidence/stage6-real-e2e.json)。记录仅含摘要 ID、图像 SHA/元数据、HTTP 状态、host 安全摘要和公网地址分类，不含原图/结果图、完整 workspace host、完整远端 task ID、签名 URL、请求响应或凭证。测试后隔离 MinIO 对象已删除，隔离数据库 task/reference/result 数据和整个测试 volume 已删除。账单控制台未查询，实际扣款状态未知；本次单张请求的估算费用上限为 ¥0.20。
+
+**阶段 6：已完成。** SafeArtifactFetcher、正式 Adapter/profile、模拟及单次真实 Provider 全链路、数据库与 MinIO 权威结果核对、短期访问/匿名拒绝验证、回归和脱敏证据均已完成。实现代码提交为 `d9e1809fe14bad85e3d19c13c82b3c494a4096cf`。以后任何创建请求仍须单独取得明确授权。模型 alias 稳定性和 8,100,000-byte request guard 仍分别属于 Provider 未承诺与本地限制；外部 exactly-once 仍不保证。
