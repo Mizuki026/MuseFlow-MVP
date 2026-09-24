@@ -425,3 +425,132 @@
 提交成功（单独的提交 HTTP 状态码未保留）；轮询 HTTP 状态为 `200,200,200,200,200`，任务状态轨迹为 `RUNNING → SUCCEEDED`。结果 URL 主机命中精确白名单，主机摘要 `0bd1575e39cb`；安全下载返回 HTTP 200，Content-Type 为 `image/png`，PNG 文件头及 `1280×1280` 尺寸校验通过，实际大小 `2,004,922` 字节，SHA-256 为 `c8bedca14b2f5e80f97a027612bd57424c403ffd284c9594ccc8079ab933aa67`。图片写入私有 MinIO；签名下载 HTTP 200 且下载字节 checksum 相同，匿名读取 403，过期签名 403。命令退出码 0，未记录完整结果 URL、签名 URL、原始厂商响应、API Key、完整 API Host、业务空间 ID 或账号信息。
 
 本次执行前非付费验证为 Provider/安全测试 `31 passed`、全量 pytest `67 passed, 0 skipped`（两条既有依赖弃用警告）、真实 Compose Mock→Redis→Worker→MinIO 测试 `3 passed`；仓库全量 Ruff、Pyright、compileall、Alembic check、Compose config 与 diff check 均通过。第 5 个窗口的真实 Provider E2E 前置条件已满足，可以在后续单独开始第 6 个窗口；这不等同于宣布整个 MVP 的全部发布验收条目已经完成。默认 MockProvider 与外部 exactly-once 降级承诺不变。
+
+## 18. 最终版阶段 0：wan2.6-image 单参考图 Provider 门禁（2026-09-24）
+
+### 18.1 当前状态
+
+本节验证最终版候选 `wan2.6-image` 的单参考图编辑能力。第 17 节真实请求只调用了 `wan2.6-t2i`，不作为本节图生图成功证据。
+
+**最终结论：`CONDITIONAL GO`。** 2026-09-24 获得本次单次授权后，隔离探针恰好发送一个创建 POST，HTTP 200；同一远端任务两次 HTTP 200 轮询，从 `RUNNING` 到 `SUCCEEDED`，结果由允许主机安全获取并经 Pillow 完整解码。单张参考图编辑能力、北京 Workspace 权限、异步任务和 PNG 结果链路已获真实证据支持。可按本节冻结契约开始后续 schema、上传、领域模型和窄 Adapter 设计；正式部署前仍须满足 18.6 的安全和费用条件。不得把单次探针外推为模型版本稳定、任意输入上限或外部 exactly-once 保证。
+
+标记含义：**官方保证**指当前官方文档明确记载；**仓库事实**指代码/命令可复查；**冻结策略**指比 Provider 能力更窄的 MuseFlow 拒绝边界；**未保证/未覆盖**指官方未承诺或本次单个真实样本没有覆盖。本节引用的官方资料均于 **2026-09-24** 访问。
+
+### 18.2 官方能力矩阵
+
+| 项目 | 已查明事实 | 状态与阶段 0 含义 |
+| --- | --- | --- |
+| Provider / 模型 | Model Studio，模型 ID `wan2.6-image`；官方能力页列为支持文生图和编辑，最多 4 张输出。 | 模型标识存在；未找到不可变模型 revision 或别名稳定期限，服务端模型行为的版本稳定性**未保证**。本地 capability version 只能标记契约快照日期。 |
+| 地域 / endpoint | 模型列于中国（北京）、新加坡、德国（法兰克福）、美国（弗吉尼亚）。北京异步创建：`POST https://{WorkspaceId}.cn-beijing.maas.aliyuncs.com/api/v1/services/aigc/image-generation/generation`，要求 `X-DashScope-Async: enable`。任务查询：同域 `GET /api/v1/tasks/{task_id}`。 | 地域、endpoint 形式和模型有官方资料。北京 API Key/Host 地域绑定，不能混用。本机只确认 `DASHSCOPE_API_HOST` 是北京 workspace 域名形态，未读取/打印 Workspace ID。 |
+| 账号权限 | 需要 Model Studio API Key。Key 权限由 Workspace 决定，可配置模型访问范围、IP 白名单等；免费额度/额度耗尽策略会影响调用。 | 本次创建及查询成功，证明当前配置的北京 Workspace、Key 与本模型在本次请求时可用；不证明其他 Workspace/Key。 |
+| 单参考图语义 | `enable_interleave=false` 明确为 image editing mode，支持基于输入图编辑、风格迁移与主体一致性；编辑模式要求 1–4 张输入图。 | 固定单张参考图真实请求完成。探针不评测语义质量，不承诺视觉相似度、主体保持质量或任意 prompt 的成功率。 |
+| 输入格式 / bytes | JPEG/JPG、PNG、BMP、WebP；PNG alpha 不支持；Wan2.6 API 页面最大 10 MB。通用 Base64 图片传输指导建议原图小于 7 MB。 | 冻结子集 PNG/JPEG/WebP、RGB、最大 6,000,000 bytes；比通用建议值低约 14%，比 10 MB 输入限制留 40% 余量。真实样本为 733,914 bytes；Wan2.6 专属 Base64 JSON body 上限**未保证**，本地 8,100,000-byte guard 不等于 Provider 接受上限。 |
+| 输入宽高 / pixels / ratio | 官方编辑指南：宽、高各 240–8,000 px；输入 aspect ratio 为 Unlimited；未说明 Wan2.6 总像素限制。 | 冻结每边 240–2,048 px、≤4,194,304 pixels、ratio 1:4–4:1。各边界较 Provider 最大边长低 74.4%，总像素是本地解码资源上限。 |
+| 帧 / 色彩 / alpha | alpha 不支持；未找到 Wan2.6 对动画帧数、色彩模式、色域、ICC、位深的完整保证。 | 冻结只接受 Pillow 完整解码后的单帧 RGB、无 alpha；拒绝灰度、palette 和动画。ICC/色域输入不作为产品承诺，上传处理需规范化或去除元数据。 |
+| Prompt | `messages` 为单轮 `user`；编辑 prompt 必填，最多 2,000 字符；negative prompt 最多 500 字符。 | 探针 prompt 固定 163 字符，不发送 negative prompt。探针本地拒绝超长输入，不依赖 Provider 截断。 |
+| 参数 / 输出 | 编辑 `size=1K` 约 1280×1280 总像素且保持最后一张输入比例；`2K` 约 2048×2048。直接宽高方式总像素约 768²–2048²、比例 1:4–4:1，边长取 16 倍数。`n` 编辑模式 1–4、默认 4；文档建议测试设 1。`prompt_extend` 默认 true；可关闭。输出格式 PNG。 | 固定参数真实返回 1280×1280 PNG，符合模型信息页的 1440×1440 与编辑 API 的 2K 口径。本契约采用两份官方资料中的较严格 1440px 上限。 |
+| 图片传递 / Base64 | 支持公网 HTTP(S) URL 或 `data:{MIME};base64,...`；通用说明称 Base64 会扩大 payload 并建议原图 <7 MB。未找到 Wan2.6 HTTP JSON body 硬上限。 | 探针采用本地字节的 Base64 Data URL；不传 MinIO/公网图 URL、不用 Provider 文件服务。当前脚本 body ceiling 8,100,000 bytes 是本地 guard，不是官方保证，也不因较小成功请求而证明边界。 |
+| 异步响应 / 状态 | 创建响应示例 `output.task_id`、`task_status=PENDING`、顶层 `request_id`。查询状态包括 PENDING、RUNNING、SUCCEEDED、FAILED、CANCELED、UNKNOWN。成功示例结果 URL 位于 `output.choices[].message.content[].image`。 | 真实创建响应和两次任务查询均为已文档化结构，任务从 `RUNNING` 到 `SUCCEEDED`，恰好返回一个结果 URL。未知结构记为协议错误，不静默套用 T2I Adapter 逻辑。 |
+| ID / 结果保留 | 创建返回服务端 task ID；状态和 URL 有效 24 小时，可据 ID 查询。结果样例是带签名参数的 OSS HTTPS URL，官方要求尽快下载。 | 实际创建取得 task ID 并在同一执行流程轮询成功；本地状态支持在 23 小时 TTL 内恢复。创建没有客户端指定 task ID 或文档定义的幂等键。提交响应丢失时不能按本地 request key 恢复。 |
+| Result host / redirects | 官方北京样例 host `dashscope-result-bj.oss-cn-beijing.aliyuncs.com`，有效期 24 小时。没有固定主机清单、重定向或重定向目标保证。 | 成功响应 host 的脱敏 SHA-256 前 12 位为 `0bd1575e39cb`，与真实调用前两台允许主机之一 `dashscope-a717.oss-accelerate.aliyuncs.com` 的摘要匹配。原始 URL/host 未保留，因此这是基于 48-bit 脱敏摘要与封闭候选集的匹配记录，不是原始 URL 的完整证据。部署契约暂只冻结该一台 HTTPS host、拒绝所有 redirect；官方未保证后续 host 恒定，变化时必须停止并重新核验。 |
+| 幂等 / 不确定创建 | 创建 schema 没有客户端幂等键和客户端 task ID；官方建议收到 ID 后轮询而不要重复创建。 | Provider 不具可依赖的原生幂等保障。服务已受理、响应未到客户端时，重复 POST 可能再次生成并计费。MuseFlow 不承诺外部 exactly-once。 |
+| 错误 / 限流 | 官方错误表含 InvalidApiKey、Workspace/Endpoint.AccessDenied、429 限流和额度类、DataInspectionFailed、IPInfringementSuspect、500/503 服务类错误。北京 `wan2.6-image` 限流表列 5 RPS/5 并发；任务查询 API 默认 RPS 20。 | 可做初步分类，但官方没有承诺码表永不变化或所有错误具统一 retry 语义；429 不能全部当作短期限流。创建失败不自动重试。 |
+| 费用 | 北京 `wan2.6-image` 标价 CNY 0.20/张；官方计费规则按成功生成图片数，失败调用不收费。 | 本次 `n=1` 的已知最大图像生成费用 CNY 0.20；优惠/免费额度/最终账单看账号控制台。状态未知后另发 POST 可能再有一笔最多 CNY 0.20 的生成费用。 |
+
+官方资料（均 2026-09-24 访问）：[Wan2.6 图像生成与编辑 API 参考](https://help.aliyun.com/en/model-studio/wan-image-generation-api-reference)、[Wan 图像编辑指南](https://help.aliyun.com/en/model-studio/wan-image-edit)、[wan2.6-image 模型信息](https://help.aliyun.com/zh/model-studio/wan2-6-image)、[图像模型清单](https://help.aliyun.com/en/model-studio/image-model/)、[Model Studio 模型价格](https://help.aliyun.com/en/model-studio/model-pricing)、[地域与 endpoint](https://help.aliyun.com/en/model-studio/regions)、[API Key 和权限](https://help.aliyun.com/en/model-studio/get-api-key)、[异步任务查询](https://help.aliyun.com/en/model-studio/manage-asynchronous-tasks)、[错误码](https://help.aliyun.com/en/model-studio/error-code)、[限流](https://help.aliyun.com/en/model-studio/rate-limit)。
+
+### 18.3 隔离探针与验证证据
+
+探针位于 `.scratch/provider-feasibility/`，没有接入生产 Provider、DB、Celery、Scheduler、Worker、MinIO 或 UI。`--check-only` 不读取凭证也不访问网络。真实创建要求对话单次授权、`--authorize-real-request`、`--confirm-max-cost-cny 0.20`、`DASHSCOPE_API_KEY` 和北京 workspace 专属 `DASHSCOPE_API_HOST`。
+
+固定图片由探针在内存中生成，不落盘：PNG、1024×1024、RGB、单帧、无 alpha、733,914 bytes，SHA-256 `0bc68705bb0e638b70c0fbc9e6c841c8388d9bbb4830c14ea0c24101395fa744`；Data URL 序列化 JSON body 978,936 bytes。固定 163 字符 prompt、单张输入、`wan2.6-image`、编辑模式、`n=1` 和 `size=1K`。没有自动创建重试；创建连接中断按“状态未知”结束。取得 task ID 后只轮询同一 task，并在本地临时文件保留 task ID 以便恢复；成功后删除。超时 connect/read/write/pool 分别 5/30/30/5 秒，轮询间隔 10 秒，总运行 600 秒，最多 60 次 poll。
+
+真实调用时探针仅接受 HTTPS allowlist 中两台既有已知主机，拒绝 userinfo/非标准端口，检查公网 IP，禁止重定向，限 HTTP 200、`image/png`、≤20 MiB，Pillow `verify()` 后完整 `load()`；当次实际结果为单帧 1280×1280 PNG，且命中后来冻结的 1440px 界限。真实调用后，探针已把 host allowlist 收窄到唯一实测主机，并把输入、输出边长限制移到完整解码之前检查；当前版本只接受该单主机、≤1440px。URL、签名参数、图片和完整响应只在进程内短暂存在，不写日志/证据。脱敏证据只存稳定状态类别、HTTP 状态、计时、输入/输出 MIME/宽高/字节数/SHA-256 与 remote/task/host hash，不记录 Key、账号/Workspace ID、完整 Host、签名 URL 或完整响应。
+
+调用前只核对两个凭证环境变量存在，Host 仅判定为北京 workspace endpoint 形态；未读/输出变量值。随后创建和轮询成功，已证明本次请求所用北京 workspace/key 有 `wan2.6-image` 权限。本阶段不提交图片文件。
+
+隐私复核发现，第一次授权执行的 preflight 曾输出 workspace host SHA-256 前 12 位（没有输出原始 host 或账号标识）。该稳定摘要不应作为诊断字段保留；已从最终证据 JSON 中移除，并从探针当前 preflight/evidence 代码中删除。当前诊断只报告 `region=cn-beijing` 与 `workspace_endpoint=dedicated`。Provider 错误只在内存中映射为稳定类别，原始错误码不写证据或日志。
+
+| 非收费命令 | 结果 |
+| --- | --- |
+| `uv run --directory backend --with Pillow pytest E:/MuseFlow/.scratch/provider-feasibility/test_wan26_i2i_probe.py` | 最终 `33 passed`；覆盖参数规范化、字节/像素/比例/模式/格式限制、JPEG/WebP 输入、动画拒绝、完整解码、Base64 body、错误分类、任务状态/ID、URL/host、媒体、endpoint、私网 IP、超时、ID 脱敏和恢复 TTL。 |
+| `uv run --directory backend --with Pillow python E:/MuseFlow/.scratch/provider-feasibility/wan26_i2i_probe.py --check-only` | exit 0；生成、完整解码并摘要固定 RGB PNG；未发 HTTP 请求。 |
+| `uv run --directory backend ruff check E:/MuseFlow/.scratch/provider-feasibility/wan26_i2i_probe.py E:/MuseFlow/.scratch/provider-feasibility/test_wan26_i2i_probe.py` | exit 0；All checks passed。 |
+| `uv run --directory backend ruff format --check E:/MuseFlow/.scratch/provider-feasibility/wan26_i2i_probe.py E:/MuseFlow/.scratch/provider-feasibility/test_wan26_i2i_probe.py` | exit 0；两个文件已格式化。 |
+| `uv run --directory backend python -m compileall -q E:/MuseFlow/.scratch/provider-feasibility/wan26_i2i_probe.py E:/MuseFlow/.scratch/provider-feasibility/test_wan26_i2i_probe.py` | exit 0。 |
+| `uv run --directory backend python E:/MuseFlow/.scratch/provider-feasibility/wan26_i2i_probe.py` | exit 2；缺少 CLI 双重显式确认，明确输出 `No request sent`，未发 HTTP 请求。 |
+| `git diff --check` | exit 0。 |
+| 敏感模式扫描 | 最终证据未发现 Key、签名 URL 或真实 workspace host；扫描命中报告中的 `<workspace>` 掩码以及测试代码里的 `workspace` / `sensitive-workspace` 合成 fixture 域名。 |
+
+真实调用获本轮单独授权后执行一次：创建 HTTP 200，`create_requests=1`；同一 task 两次查询均 HTTP 200，轨迹 `RUNNING → SUCCEEDED`；总耗时 13.077 秒。最终 PNG 为 RGB 单帧 1280×1280、2,700,108 bytes、SHA-256 `2921676e41abd5136c03c04726dfe59d55c5295f6b283289f8fba31d6b873253`，完成完整解码。结果主机哈希 `0bd1575e39cb` 与调用前两台 allowlist 候选中的 `dashscope-a717.oss-accelerate.aliyuncs.com` 前 12 位摘要匹配；由于原始 URL/host 未保存，按脱敏摘要证据记录，不声称完整 host 可从记录独立复原。脱敏记录为 `[i2i-probe.json](../../.scratch/provider-feasibility/evidence/i2i-probe.json)`；原图和结果图都未保存，成功后本地 task ID 状态文件已删除。实际只创建了一次，无自动重试。本次未读取账单控制台，实际扣款/免费额度状态未知。
+
+### 18.4 架构适配性与风险
+
+仓库当前 `[providers.py](../../backend/src/museflow/providers.py)` 的 `GenerationProvider.generate()` 接收短生命周期 Provider request、`request_key`、`remote_request_id` 和回调；当前 `GenerationRequest` 尚无参考图片，阶段 0 未修改接口。最终技术设计已有 `VerifiedReferenceImage`/`ProviderGenerationRequest` seam。Wan 协议可让窄 Adapter 负责 Data URL、创建、ID、轮询和稳定错误转换，结果下载通过独立安全 fetcher 注入；不需要 ORM、事务或 MinIO SDK，差异可留在 Adapter 内。
+
+创建请求只能一次。已知 ID 后 GET 查询与官方 24 小时期限符合“同一 attempt 恢复轮询”；未来 Worker 必须先保存 ID，再 poll。当前 repo 的 `[assets.py](../../backend/src/museflow/assets.py)` `SecureResultDownloader` 有精确 host、HTTPS、逐跳 redirect 检查、DNS/IP 公网检查、大小、MIME、文件头和基本尺寸校验，但**没有 Pillow 完整解码，也未把 DNS 解析结果 pin 到实际 socket 连接**。因此当前代码不能被描述为已经满足全部 SafeArtifactFetcher 安全要求；正式 fetcher 必须补全图片完整解码，并评估 DNS 重绑定连接风险。本次探针会独立执行完整解码和 fail-closed 检查。
+
+**创建响应不确定窗口**：Provider 接受 POST 后，如果连接在客户端收到 `task_id` 前断开，MuseFlow 没有远端 ID 或幂等键可查。按平台策略再提交会有重复调用/重复计费可能。`provider_request_key` 只是本地键。只能承诺一个权威本地 task/result；不得承诺外部 exactly-once。Adapter 不隐式 retry；是否由平台策略创建新 attempt，必须显式记录状态未知及外部费用风险。
+
+冻结的错误分类初映射：
+
+| DashScope 现象 | 探针类别 | MuseFlow 初步类别 / 行为 |
+| --- | --- | --- |
+| 缺凭证、401 InvalidApiKey、403 Workspace/Endpoint.AccessDenied | `configuration_or_permission` | Profile/凭证配置错误，永久停止，不自动 retry。 |
+| 400 参数/图片格式/尺寸问题 | `invalid_input_or_parameters` | `PROVIDER_INVALID_REQUEST`，永久失败。 |
+| DataInspectionFailed、IPInfringementSuspect | `content_safety_rejected` | `PROVIDER_CONTENT_REJECTED`，不改写输入、不 retry。 |
+| 429 RateQuota/BurstRate | `rate_limited` | `PROVIDER_RATE_LIMITED`；平台退避可创建新 attempt，探针不重发 POST。 |
+| 余额、free-tier only、allocation/account quota | `billing_or_account_quota` 或 `rate_or_account_quota_unclassified` | 账号阻断，不当作短暂限流自动重试；未分类 quota 保持阻断态。 |
+| 500/503、ModelServiceFailed/ServiceUnavailable | `provider_service_error` | `PROVIDER_UNAVAILABLE` 候选；已有 task ID 则继续原 task 轮询。 |
+| 创建 timeout/连接中断、成功响应无 task ID | `submission_state_unknown` | `PROVIDER_SUBMISSION_UNKNOWN` 候选；不得 Adapter 自动 POST 重试。 |
+| JSON/状态/结果字段不符 | `*_protocol_error` | `PROVIDER_INVALID_RESPONSE` 或 `RESULT_INVALID`，未知响应 fail-closed。 |
+| 未知 host、redirect、私网 IP、MIME/大小/PNG 解码错误 | `result_*_rejected` | `RESULT_INVALID`，不保存结果。 |
+
+错误映射由官方码表和本地纯函数测试支撑；具体错误是否稳定及是否适合重试未获 Provider 保证。未知异常不默认归为可重试 Provider 故障。
+
+### 18.5 冻结的 Provider profile、输入白名单与资源预算
+
+下列值是 MuseFlow 本地契约，不宣称为 Provider 服务端上限。输入格式/边界取官方范围更严格的一侧并附安全余量；一张真实样本验证了调用链路，但没有验证所有输入/请求体边界。超出范围必须在调用前拒绝。每次模型 alias 或服务协议有实质变化时，先更新 capability version 并重新验证。
+
+| 字段 | 冻结值 | 依据、实测与安全余量 |
+| --- | --- | --- |
+| `provider_name` / `provider_profile` | `dashscope` / `dashscope-wan2.6-image-cn-beijing-edit` | 本次北京 Workspace 真实创建、轮询及结果下载成功。 |
+| `model_name` / `capability_version` | `wan2.6-image` / `official-doc-snapshot-2026-09-24` | 官方无 immutable revision 或 alias 稳定期限保证；上线前若服务目录/行为变化，重新核验，不声称模型输出可复现。 |
+| 地域 / endpoint | `cn-beijing` / Workspace 专属 `https://{WorkspaceId}.cn-beijing.maas.aliyuncs.com`，HTTPS 443 | 实际创建 HTTP 200；凭证 Key 与地域按 workspace 配置。不得跨地域重用该 profile。 |
+| 输入格式 / 色彩 / 帧 / alpha | `image/png`、`image/jpeg`、`image/webp`；单帧 `RGB`；无 alpha；其他模式拒绝 | 是 Provider 格式集合的子集；PNG alpha 官方不支持。Pillow 完整解码；在解码前检查维度；上传边界规范化并剥离不支持/不需要的 ICC、EXIF 元数据。 |
+| 输入字节 | ≤6,000,000 bytes | Provider API 10 MB 和通用 Base64 指导原图 <7 MB；本地值较 7,000,000 bytes 低 14.3%、较 10,000,000 bytes 低 40%。实测输入 733,914 bytes，未实测上边界。 |
+| 输入宽高 / pixels / ratio | 每边 240–2,048 px；总像素≤4,194,304；宽高比 1:4–4:1 | 官方边长 240–8,000 且 ratio Unlimited；每边本地上限低 74.4%，总像素限制管理解码内存。拒绝极端长图。 |
+| Base64 JSON 请求体 | ≤8,100,000 bytes | 由 6,000,000 bytes 原图编码约 8,000,000 bytes，加 prompt/JSON 余量形成。Wan2.6 body 硬上限未保证；本次成功实测 978,936 bytes，故本地限制是保守 guard，不能声称 Provider 已接受到该上限。若在此上限内遇请求体拒绝，阻断输入并重新评估。 |
+| Prompt / 模式 | prompt 1–2,000 字符；单轮 `user`；`enable_interleave=false` | 官方编辑限制；本次 163 字符，明确为 image editing mode。拒绝空白和超长 prompt。 |
+| 输出数 / 参数 / 格式 | `n=1`、`size=1K`、`prompt_extend=false`、`watermark=false`、PNG、最大边≤1,440 px | 实测 1280×1280、RGB、单帧 PNG。采用官方模型清单 1440×1440 与编辑 API 2K≈2048 的较严格值；输出仍比上限留 160px 余量。超出时拒绝并重核口径。 |
+| Provider 响应体 | ≤1,048,576 bytes | 本地防止无界响应；未发现官方响应体上限。响应需要完整 JSON 且只取已文档化字段。 |
+| Result bytes / media | `image/png`；≤20 MiB；完整 Pillow `verify()` + `load()`；宽高≤1,440；单帧 | 实测 2,700,108 bytes，即约 7.8 倍字节余量；拒绝其他 MIME、超长和解码失败。结果主机只允许实测命中的精确 host，重定向 0。 |
+| Result host | `dashscope-a717.oss-accelerate.aliyuncs.com`，HTTPS 443；DNS 必须只解析为公网 IP；redirect=0 | 实测脱敏 host digest 与此 host 匹配。Provider 未保证 host 集合稳定；Host 变化 fail-closed、重新验证后再改 allowlist。生产 fetcher 还须把 DNS/IP 验证绑定至实际连接。 |
+| 创建 / 轮询 / 总超时 | connect 5s、read 30s、write 30s、pool 5s；poll 10s；总 600s、最多60次 GET | 10s 间隔、10分钟总限时；本次 2 次 poll、13.077s 完成。task ID 本地恢复状态 TTL 23h，比官方 24h 保留期短 1h。创建只尝试一次。 |
+| 每个在途 attempt 内存预算 | 预留 128 MiB | 静态高位估算：6 MB 输入、Base64 与 JSON 副本约 24 MB、20 MiB 下载缓冲及拼接约40 MB、输入/输出各约16 MiB 解码工作区，再留约25%余量。此为容量预算，不是实测峰值 RSS。 |
+| Worker / 容器预算 | Celery 并发 1；容器内存至少 1 GiB | 至少为128 MiB单 attempt 预算的8倍并容纳运行时/队列开销；上线前通过实际部署监控调整，不在阶段0启动并发扩容。 |
+
+### 18.6 真实调用记录、风险与最终门禁
+
+| 证据项 | 结果 |
+| --- | --- |
+| 调用授权 / 创建 | 用户在本窗口单独授权最高 ¥0.20；只提交 1 次 POST，HTTP 200，无自动创建重试。 |
+| 任务轮询 | 同一 remote task 查询 2 次，均 HTTP 200；`RUNNING → SUCCEEDED`。总耗时 13.077 秒。 |
+| 输入 | 探针内存生成 PNG RGB 单帧、无 alpha、1024×1024、733,914 bytes；SHA-256 `0bc68705bb0e638b70c0fbc9e6c841c8388d9bbb4830c14ea0c24101395fa744`。 |
+| 输出获取 / 解码 | HTTP 200、`image/png`；Pillow `verify()` 与完整 `load()` 通过；RGB 单帧 1280×1280、2,700,108 bytes；SHA-256 `2921676e41abd5136c03c04726dfe59d55c5295f6b283289f8fba31d6b873253`。 |
+| Result host | host SHA-256 前 12 位 `0bd1575e39cb`；与当次 allowlist 的唯一匹配候选 `dashscope-a717.oss-accelerate.aliyuncs.com` 相同。原始 URL 不保存；下载期间未发生重定向。 |
+| 脱敏 Provider IDs | request ID digest `cfd766447235`；remote task ID digest `2397992d058f`。不保存 workspace 派生标识。 |
+| 费用 | 官方单张标价上限 CNY 0.20；未读取账单控制台，故不声称实际扣款金额。 |
+| 记录文件 | `[脱敏探针证据](../../.scratch/provider-feasibility/evidence/i2i-probe.json)`。只保存状态、HTTP、时长、图像摘要及脱敏 ID/hash；不保存 Key、workspace、完整 host、签名 URL、远端原响应或图片。成功后 task 状态文件已删除。 |
+
+**结论：`CONDITIONAL GO`。** 真实成功足以允许按 18.5 的 `wan2.6-image` 北京 profile 开始后续 schema、上传、领域模型和窄 Adapter 实施；产品承诺限定为白名单内的一张 RGB 单参考图输入，返回至多一张符合冻结限制的 PNG 编辑结果。不承诺视觉质量、模型 alias 长期稳定、Provider 接受超出实测样本的任意 JSON body，也不承诺外部 exactly-once。
+
+正式部署前的硬条件：
+
+1. 正式 `SafeArtifactFetcher` 必须对下载执行 HTTPS/精确 host/逐跳 redirect/DNS 公网地址、响应大小、MIME 和完整图片解码校验，并防止 DNS 检查结果与实际连接目标脱节（连接 pin 或等效机制）。当前 `SecureResultDownloader` 尚未满足完整解码与 DNS pin 条件。
+2. 每个 attempt 最多一个逻辑创建 POST。不得对超时或响应不确定状态自动重发；先持久化 task ID，再在同一 attempt 内恢复轮询。新建 attempt 可能重复计费，不得宣传外部 exactly-once。
+3. 输入在本地白名单和字节/像素/比例上限内拒绝超限。8,100,000-byte 请求体上限是本地 guard；本次 Provider 只证实 978,936-byte body 成功。任何此上限内的 request-size 拒绝必须停止扩展并重新核验，不能默默降低 guard 后称边界已验证。
+4. Result host 固定为实测命中的一台。未来返回新 host 或任何 redirect 均 fail-closed，须先通过一轮新的官方文档和单独授权探针确认后才能放行。
+5. 上线前复核模型目录、地域/价格、alias 行为和当前额度；若 API 字段或模型行为发生实质变化，更新 capability version 并重新评估门禁。
+
+如产品必须支持无状态未知窗口自动恢复、未授权重复请求也绝不可能产生重复费用、任意上传尺寸或 Provider 保证模型固定版本，则本 Conditional GO 不适用，应改选具有对应合同保障的 Provider，或收缩产品承诺。

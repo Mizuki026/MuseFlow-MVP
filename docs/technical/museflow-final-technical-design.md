@@ -216,6 +216,8 @@ ProviderGenerationRequest
 
 只在取得 `UploadFile` 后检查文件大小不能被描述为传输层限制。
 
+阶段 0 已冻结 DashScope 图生图 profile：PNG/JPEG/WebP、单帧 RGB、无 alpha、原图≤6,000,000 bytes、每边 240–2,048 px、≤4,194,304 pixels、比例 1:4–4:1；Base64 JSON body 本地 guard 为 8,100,000 bytes。Celery 并发冻结为 1，单 attempt 预留 128 MiB、容器预算至少 1 GiB。Provider 未保证此 JSON body 上限，本次实测仅证明 978,936-byte 请求体可用；边界拒绝时必须 fail closed。依据与安全余量见[阶段 0 报告](museflow-provider-feasibility.md)。
+
 ## 7. 参考素材与对象存储边界
 
 ### 7.1 窄端口
@@ -358,13 +360,13 @@ Provider 接口只接收 `ProviderGenerationRequest`。图生图请求包含 `Ve
 ### 9.2 DashScope Adapter
 
 - 文生图继续使用已经验收的 `wan2.6-t2i` 协议。
-- 图生图使用 `wan2.6-image`，`enable_interleave=false`、单张参考图、`n=1`。
+- 图生图使用冻结 profile `dashscope-wan2.6-image-cn-beijing-edit`，模型 `wan2.6-image`，北京 Workspace endpoint，`enable_interleave=false`、单张 RGB 参考图、`n=1`、`size=1K`，输出 PNG 最大边 1,440 px。
 - Worker 通过 `ReferenceAssetReader` 获得已验证图片，Adapter 将其编码为 Provider 支持的 Base64 data URL；不生成面向第三方的公开 MinIO URL。
-- Adapter 负责请求转换、远端任务 ID、轮询和错误归一化。需要下载远端结果时，它组合注入的 `SafeArtifactFetcher`，返回经过主机、重定向、网络地址、大小、媒体类型、文件头和尺寸验证的 bytes 与元数据。
+- Adapter 负责请求转换、远端任务 ID、轮询和错误归一化。需要下载远端结果时，它组合注入的 `SafeArtifactFetcher`，返回经过精确 host、逐跳 redirect、DNS/IP 公网判定并绑定实际连接、大小、媒体类型、完整图片解码和尺寸验证的 bytes 与元数据。阶段 0 只观测到一个允许的结果 host，host 变化须 fail-closed 并重新核验。
 - 创建请求不在 Adapter 内自动重发；平台 attempt 和现有 retry 策略继续拥有重试决定。
 - Adapter 在提交前、轮询间隔和结果下载前检查 `LeaseGuard`。失去 ownership 后尽快停止本地工作；已发出的外部请求仍保留 exactly-once 降级语义。
 
-正式 schema、上传和前端实现前必须完成真实图生图 Provider 阶段 0，确认地域、模型权限、单次费用、输入限制、Base64 请求上限、轮询协议、结果主机和外部幂等边界，并冻结本版本的产品上限。
+真实图生图 Provider 阶段 0 已于 2026-09-24 完成一次单独授权的成功探针，结论为 `CONDITIONAL GO`。能力矩阵、脱敏证据和冻结限制见[阶段 0 报告](museflow-provider-feasibility.md)。可以按冻结契约继续实现；生产 SafeArtifactFetcher 的 DNS 连接绑定、单 attempt 单创建和 body 未验证上界等上线条件仍必须落实。
 
 ### 9.3 MockProvider
 
@@ -636,7 +638,7 @@ Playwright 使用 `MockProvider` 覆盖：
 - 在逐次授权和费用上限内执行一次单参考图成功探针。
 - 冻结本版本 MuseFlow 输入白名单、资源预算和 Provider profile。
 
-验收：成功路径和能力矩阵有脱敏记录；不通过则停止实施并重新选型或缩减承诺。
+验收：成功路径和能力矩阵有脱敏记录。阶段 0 已获 `CONDITIONAL GO`；继续实施须遵守 Provider profile 与报告列明的部署前置条件。若实际部署触碰未保证的协议边界或安全条件不成立，停止并重新选型或缩减承诺。
 
 ### 阶段 1：不可变结果与 fencing
 
@@ -751,7 +753,7 @@ Playwright 使用 `MockProvider` 覆盖：
 - 创建、详情、历史三个正式前端页面及 OpenAPI 类型生成。
 - MVP 单元、集成、故障恢复和端到端测试。
 
-下一步严格从阶段 0 开始：先完成真实图生图 Provider 门禁；通过后分别实施不可变结果候选与 fencing、lease heartbeat，再进入数据库迁移和参考素材。不得在 P0 可靠性缺口修复前扩展图生图任务。
+阶段 0 已完成并得出 `CONDITIONAL GO`。下一步从阶段 1 开始实施不可变结果候选与 fencing、lease heartbeat；按实施阶段再进入数据库迁移、参考素材和 Provider Adapter。正式接入真实结果下载前必须先实现满足阶段 0 报告安全条件的 `SafeArtifactFetcher`，不得在 P0 可靠性缺口修复前扩展图生图任务。
 
 产品与架构决策已经在 2026-09-24 的审查中收敛。每次真实图生图请求仍需要单独确认账号、地域、费用、请求参数和单次授权；文档结论本身不构成付费调用授权。
 
