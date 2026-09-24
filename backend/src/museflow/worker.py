@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
+from typing import Any, cast
 from uuid import UUID
 
 from celery import Celery  # pyright: ignore[reportMissingTypeStubs]
@@ -13,6 +14,8 @@ from museflow.db.models import GenerationTaskModel
 from museflow.db.session import create_session_factory
 from museflow.providers import create_provider_for_task
 from museflow.queue import create_celery_app
+from museflow.reference_assets.blob_store import MinioBlobStore
+from museflow.reference_assets.maintenance import ReferenceAssetMaintenance
 from museflow.runtime import worker_runtime_probe
 from museflow.tasks.execution import ExecuteGenerationAttempt
 from museflow.tasks.result_publication import ResultPublicationStatus
@@ -83,6 +86,38 @@ def execute_task(task_id: str) -> None:
         close = getattr(provider, "close", None)
         if callable(close):
             close()
+
+
+@cast(Any, celery_app).task(
+    name="museflow.reference_asset_maintenance",
+    ignore_result=True,
+    time_limit=120,
+    soft_time_limit=90,
+)
+def reference_asset_maintenance(message_type: str, asset_id: str) -> None:
+    factory = _session_factory()
+    maintenance = ReferenceAssetMaintenance(factory, MinioBlobStore())
+    if message_type == "DELETE_REFERENCE_ASSET":
+        deleted = maintenance.delete_asset(UUID(asset_id))
+        logger.info(
+            "reference asset deletion maintenance finished",
+            extra={"asset_id": asset_id, "deleted": deleted},
+        )
+        return
+    if message_type == "RUN_REFERENCE_MAINTENANCE":
+        summary = maintenance.run_batch()
+        logger.info(
+            "reference asset maintenance batch finished",
+            extra={
+                "staging_ready": summary.staging_ready,
+                "staging_failed": summary.staging_failed,
+                "storage_retries": summary.storage_retries,
+                "deleted": summary.deleted,
+                "delete_retries": summary.delete_retries,
+            },
+        )
+        return
+    raise ValueError("unsupported reference asset maintenance operation")
 
 
 if __name__ == "__main__" and "--check-ready" in sys.argv:

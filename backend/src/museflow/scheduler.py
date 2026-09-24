@@ -1,14 +1,38 @@
 from __future__ import annotations
 
+import logging
 import os
 import sys
 import time
 
 from museflow.db.session import create_session_factory
-from museflow.queue import CeleryTaskPublisher, create_celery_app
+from museflow.queue import CeleryMaintenancePublisher, CeleryTaskPublisher, create_celery_app
+from museflow.reference_assets.dispatch import (
+    ReferenceMaintenanceOutboxDispatcher,
+    ReferenceMaintenanceScheduler,
+)
 from museflow.runtime import runtime_probe
 from museflow.tasks.dispatcher import OutboxDispatcher
 from museflow.tasks.recovery import RecoverExpiredLeases, ScheduleDueRetries
+
+logger = logging.getLogger(__name__)
+
+
+def run_scheduler_iteration(
+    retries: ScheduleDueRetries,
+    leases: RecoverExpiredLeases,
+    dispatcher: OutboxDispatcher,
+    maintenance_scheduler: ReferenceMaintenanceScheduler,
+    maintenance_dispatcher: ReferenceMaintenanceOutboxDispatcher,
+) -> None:
+    retries.run_once()
+    leases.run_once()
+    dispatcher.dispatch_once()
+    try:
+        maintenance_scheduler.run_once()
+        maintenance_dispatcher.dispatch_once()
+    except Exception:
+        logger.exception("reference asset maintenance dispatch failed")
 
 
 def run_scheduler() -> None:
@@ -24,10 +48,14 @@ def run_scheduler() -> None:
     factory = create_session_factory(database_url)
     retries = ScheduleDueRetries(factory)
     leases = RecoverExpiredLeases(factory)
+    maintenance_scheduler = ReferenceMaintenanceScheduler(factory)
+    maintenance_dispatcher = ReferenceMaintenanceOutboxDispatcher(
+        factory, CeleryMaintenancePublisher(celery_app)
+    )
     while True:
-        retries.run_once()
-        leases.run_once()
-        dispatcher.dispatch_once()
+        run_scheduler_iteration(
+            retries, leases, dispatcher, maintenance_scheduler, maintenance_dispatcher
+        )
         time.sleep(interval)
 
 

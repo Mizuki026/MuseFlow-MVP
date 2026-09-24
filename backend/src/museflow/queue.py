@@ -5,6 +5,7 @@ from typing import Any, Protocol, cast
 from uuid import UUID
 
 from celery import Celery  # pyright: ignore[reportMissingTypeStubs]
+from kombu import Queue  # pyright: ignore[reportMissingTypeStubs]
 
 
 class TaskPublisher(Protocol):
@@ -17,14 +18,40 @@ class CeleryTaskPublisher:
         self._task_name = task_name
 
     def publish(self, task_id: UUID) -> None:
-        cast(Any, self._celery_app).send_task(self._task_name, args=[str(task_id)])
+        cast(Any, self._celery_app).send_task(
+            self._task_name, args=[str(task_id)], queue="generation"
+        )
+
+
+class CeleryMaintenancePublisher:
+    def __init__(self, celery_app: Celery) -> None:
+        self._celery_app = celery_app
+
+    def publish(self, message_type: str, asset_id: UUID) -> None:
+        cast(Any, self._celery_app).send_task(
+            "museflow.reference_asset_maintenance",
+            args=[message_type, str(asset_id)],
+            queue="maintenance",
+        )
 
 
 def create_celery_app(redis_url: str | None = None) -> Celery:
     broker_url = redis_url or os.environ.get("REDIS_URL", "redis://127.0.0.1:6379/0")
-    return Celery(
+    app = Celery(
         "museflow",
         broker=broker_url,
         backend=None,
         include=["museflow.worker"],
     )
+    cast(Any, app).conf.update(
+        task_default_queue="generation",
+        task_queues=(Queue("generation"), Queue("maintenance")),
+        task_routes={
+            "museflow.execute_task": {"queue": "generation"},
+            "museflow.reference_asset_maintenance": {"queue": "maintenance"},
+        },
+        task_acks_late=True,
+        task_reject_on_worker_lost=True,
+        worker_prefetch_multiplier=1,
+    )
+    return app

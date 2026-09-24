@@ -32,6 +32,7 @@ class OutboxDispatcher:
                     .where(
                         OutboxMessageModel.published_at.is_(None),
                         OutboxMessageModel.available_at <= self._clock(),
+                        OutboxMessageModel.message_type == "EXECUTE_TASK",
                     )
                     .order_by(OutboxMessageModel.created_at.asc(), OutboxMessageModel.id.asc())
                     .limit(limit)

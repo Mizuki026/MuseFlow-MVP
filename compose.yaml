@@ -115,7 +115,7 @@ services:
 
   worker:
     build: ./backend
-    command: ["uv", "run", "--no-dev", "celery", "-A", "museflow.worker:celery_app", "worker", "--loglevel=INFO", "--concurrency=1"]
+    command: ["uv", "run", "--no-dev", "celery", "-A", "museflow.worker:celery_app", "worker", "--loglevel=INFO", "--concurrency=1", "-Q", "generation"]
     environment:
       MUSEFLOW_DATABASE_URL: postgresql+psycopg://museflow:museflow@postgres:5432/museflow
       REDIS_URL: redis://redis:6379/0
@@ -128,6 +128,29 @@ services:
       MUSEFLOW_PROVIDER: ${MUSEFLOW_PROVIDER:-mock}
       DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
       DASHSCOPE_API_HOST: ${DASHSCOPE_API_HOST:-}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "uv", "run", "--no-dev", "python", "-m", "museflow.worker", "--check-ready"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  maintenance-worker:
+    build: ./backend
+    command: ["uv", "run", "--no-dev", "celery", "-A", "museflow.worker:celery_app", "worker", "--loglevel=INFO", "--concurrency=${MUSEFLOW_MAINTENANCE_CONCURRENCY:-1}", "--time-limit=120", "--soft-time-limit=90", "-Q", "maintenance"]
+    environment:
+      MUSEFLOW_DATABASE_URL: postgresql+psycopg://museflow:museflow@postgres:5432/museflow
+      REDIS_URL: redis://redis:6379/0
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
+      MINIO_BUCKET: ${MINIO_BUCKET:-museflow-results}
     depends_on:
       migrate:
         condition: service_completed_successfully
