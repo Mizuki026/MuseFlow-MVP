@@ -1,106 +1,84 @@
-# MuseFlow MVP
+# MuseFlow
 
-MuseFlow 是面向开发者和面试评审者的可靠性作品集项目。MVP 只允许在本机或受信网络运行，**不得直接暴露到公网**。
+MuseFlow 是一个面向本机和受信网络的图像生成工作流演示项目。它包含任务恢复、参考素材校验、任务历史、不可变结果和 Provider 适配器。默认 Compose 使用 `MockProvider`，不调用真实 Provider，也不需要 API Key。MuseFlow 没有用户认证或公网滥用防护，**不得直接暴露到公网**。
 
-## 第 1 窗口历史记录：任务核心与 HTTP API
+## 一条命令启动
 
-当前后端工具链使用 Python 3.13、uv、FastAPI、SQLAlchemy、Alembic 和 PostgreSQL。依赖锁文件位于 `backend/uv.lock`。
+需要 Docker Desktop 与 Docker Compose。首次构建还需要 Docker Hub 和 Quay 镜像仓库可达。
 
-### 本地演示：Compose + 正式前端
-
-Docker Desktop、Docker Compose、Node.js 24.18.0/npm 和 uv 是本地演示的前置条件。首次构建还需要 Docker Desktop 能访问 Docker Hub 和 Quay 的镜像 registry，或已经缓存所需镜像；Compose 所有端口只绑定到 `127.0.0.1`。MuseFlow MVP 没有认证、限流、用户隔离或公网滥用防护，**不得直接暴露到公网**。
-
-首次运行或代码更新后，在仓库根目录执行：
+在仓库根目录执行：
 
 ```powershell
-docker compose up -d --build
-docker compose ps --all
-Invoke-WebRequest http://127.0.0.1:8000/api/v1/health/live
-Invoke-WebRequest http://127.0.0.1:8000/api/v1/health/ready
+docker compose up --build
 ```
 
-`migrate` 和 `minio-init` 是成功后退出的一次性 job；`api`、`postgres`、`redis`、`scheduler`、`worker` 和 `minio` 应显示为运行且健康。API readiness 只检查数据库和迁移版本，Scheduler/Worker 的容器 healthcheck 还会检查各自依赖；MinIO 可用性由 `minio/health/ready` 和 Worker healthcheck 覆盖。
+打开 [http://127.0.0.1:5173/tasks/new](http://127.0.0.1:5173/tasks/new)。正式 UI、`/api` 代理、API、Scheduler、generation Worker、maintenance Worker、PostgreSQL、Redis 和私有 MinIO 会一起启动。数据库迁移与 MinIO bucket 初始化由一次性 Compose 服务自动完成。
 
-然后启动正式前端：
+默认入口只需访问 Web UI。API 通过 `http://127.0.0.1:5173/api/v1` 代理，也保留仅绑定本机的 `http://127.0.0.1:8000/api/v1` 调试端口。PostgreSQL `55432`、Redis `6379`、MinIO API `9000` 与 MinIO Console `9001` 也只绑定 `127.0.0.1`。可将 `.env.example` 复制为 `.env` 后覆盖端口和本机开发凭据。默认示例凭据不能用于共享或公网环境。
+
+检查服务：
 
 ```powershell
+docker compose ps --all
+docker compose logs --tail=100 web api scheduler worker maintenance-worker
+```
+
+按 `Ctrl+C` 停止前台服务。也可以在另一个终端运行 `docker compose stop`；`docker compose down` 会移除容器和网络并保留数据库、Redis、MinIO 数据卷。不要用 `docker compose down -v` 重置有用数据。
+
+## 数据库与私有存储
+
+当前 Alembic head 为 `0007_reference_operation_leases`。干净数据库会由 `migrate` 自动升级到当前 head；仓库 Compose 的 PostgreSQL、Redis 和 MinIO 数据分别保存在独立命名 volume 中。
+
+把现有数据库交给新版本之前，先完成可恢复备份，再核对关键表迁移前后的行数和业务数据。迁移不提供自动 downgrade，部分历史迁移明确不可逆。默认 Compose 项目可能包含旧数据，不要在未备份的数据库上试迁移。
+
+MinIO bucket 默认保持私有。浏览器图片使用 MuseFlow 的稳定 `/api/v1/assets/{id}/download` 路径，后端需要时再签发短期访问能力；前端不保存对象键或签名 URL。
+
+MuseFlow API 没有用户级认证、授权或限流，只适用于本机或受信网络。Compose 将所有宿主机端口限制到 `127.0.0.1`；不要把当前 Compose 直接暴露到公网。
+
+## 可选：本地 Vite 开发
+
+正式 Compose 前端是由 Node 构建、Nginx 提供静态文件的 Web 容器。日常开发可以让 Vite 把 `/api` 代理到本机 API：
+
+```powershell
+docker compose up -d postgres redis minio minio-init migrate api scheduler worker maintenance-worker
 Push-Location frontend
 npm ci
 npm run dev -- --host 127.0.0.1
 Pop-Location
 ```
 
-打开 `http://127.0.0.1:5173/tasks/new`，可用 Demo-only MockProvider 复现成功、临时失败、限流、超时和永久失败场景。正式页面只使用稳定的 MuseFlow 下载路径，不会把 MinIO 签名 URL 写入前端状态。
+开发 UI 地址为 `http://127.0.0.1:5173/tasks/new`。前端使用 React、TypeScript、Vite、React Router、TanStack Query 和 React Hook Form；类型由 FastAPI OpenAPI 生成。
 
-本地端点：
+## 显式启用真实 Provider
 
-- API：`http://127.0.0.1:8000/api/v1`
-- Redis：`redis://127.0.0.1:6379/0`
-- MinIO API：`http://127.0.0.1:9000`
-- MinIO Console：`http://127.0.0.1:9001`
-- 私有 bucket：`museflow-results`
-
-Compose init job 会创建 bucket 并显式保持私有。默认凭据只适用于本机或受信网络的开发环境，不能复用于任何公网或共享环境。
-
-### 停止、重置和排障
+默认 Compose 在 API 和 Worker 中固定使用 `MockProvider`。如已逐次取得真实调用授权，并接受 Wan Provider 的调用费用，先在当前 PowerShell 会话安全设置 `DASHSCOPE_API_KEY` 与获准的 `DASHSCOPE_API_HOST`，再明确使用覆盖文件：
 
 ```powershell
-# 停止容器，保留数据库、Redis 和 MinIO 数据卷
-docker compose stop
-
-# 删除容器和网络，保留数据卷；下次 up 会继续使用现有数据
-docker compose down
-
-# 开发环境完全重置（会删除本 Compose 项目的全部数据卷）
-docker compose down -v
-docker compose up -d --build
+docker compose -f compose.yaml -f compose.real-provider.yaml up --build
 ```
 
-排障时先执行 `docker compose ps --all`、`docker compose logs --tail=100 api scheduler worker minio`。如果构建报 `failed to fetch oauth token`、`auth.docker.io` 或 `registry-1.docker.io` 超时，先在 Docker Desktop 中检查代理/网络，或在可访问 Docker Hub 的网络中预拉取 `python:3.13-slim` 等基础镜像；这是 registry 可达性问题，Compose 配置本身不会通过重试解决。迁移失败看 `docker compose logs migrate`，MinIO bucket 初始化失败看 `docker compose logs minio-init`；确认依赖恢复后可用 `docker compose up -d --force-recreate <service>` 重启单个服务。宿主机测试数据库必须使用当前 Compose 的 PostgreSQL 用户、密码、数据库名和 `127.0.0.1:55432` 端口，并通过 `MUSEFLOW_TEST_DATABASE_URL` 传入；不要使用旧临时实例连接串。
+覆盖文件缺少这两个变量时会拒绝启动。启用后创建图像任务会访问真实 Provider 并可能产生费用；不要用它运行常规测试或 Compose UI E2E。每次实际 Provider 请求都需要单独授权。历史任务如果记录了不可用的 Provider profile，会明确失败，不会静默切换。
 
-### 当前环境审核与历史窗口边界
+## 验证与开发命令
 
-Docker Desktop、Docker Engine 和 Docker Compose 已可用；Redis 与 MinIO 已通过 Compose 启动并完成健康检查。第 1 窗口阶段的业务代码范围是 PostgreSQL、任务领域和 HTTP API；当时刻意没有提前引入 Scheduler、Celery、Worker、Provider 或对象存储逻辑。这里记录的是实施历史，不是当前版本的运行边界；当前 Compose 已包含这些组件，完整交付状态以本文后续说明和技术方案中的当前验证快照为准。
+```powershell
+Push-Location frontend
+npm run generate:api
+npm run check:api-generated
+npm run typecheck
+npm run lint
+npm test
+npm run build
+npm run test:e2e:compose
+Pop-Location
+```
 
-`127.0.0.1:55432` 的隔离 PostgreSQL 现在也是宿主机集成测试的可复现入口，不是 Redis 或 MinIO 的替代方案，也不与 Compose 依赖冲突。Compose 内部服务使用 `postgres`、`redis` 和 `minio` 服务名；宿主机测试使用 `127.0.0.1` 和映射端口。Provider 仍需显式配置和受控验证，不存在自动替代承诺。
-## 前端环境
+`npm run test:e2e:compose` 使用独立 Compose project 名、隔离 volume 和临时本机端口启动完整 MockProvider 系统，运行 Chromium Playwright，再检查栈重启后的持久化并只清理它创建的项目资源。需要本机已安装 Playwright Chromium。前端静态构建、真实 Compose 服务、API 与私有 MinIO 请求都会参与 E2E，不会调用真实 Provider。添加 `--backend-check` 会在该隔离栈内再运行 Alembic 检查和完整后端 pytest。
 
-前端使用 React、TypeScript、Vite、React Router、TanStack Query 和 React Hook Form；测试工具已安装 Vitest、Testing Library 和 Playwright。
+后端命令在 `backend` 目录由 `uv` 管理，完整回归为 `uv run pytest -q`；静态检查包括 `uv run ruff check .`、`uv run pyright`、`uv run python -m compileall -q src tests` 和 Alembic 检查。主 Compose 的 `migrate` 会执行 `alembic upgrade head`。
 
-在 frontend 目录运行：
+## 前端路由
 
-    npm run dev
-    npm run generate:api
-    npm run build
-    npm run typecheck
-    npm test
-    npm run lint
-    npm run test:e2e
-
-frontend/.env 已配置本机 API 地址 http://127.0.0.1:8000/api/v1，并由 Git 忽略。
-正式前端提供 `/tasks/new`、`/tasks/:taskId` 和 `/tasks`。前端类型由 FastAPI OpenAPI 生成；Playwright 使用显式启用的 Demo API 和确定性 MockProvider，不调用真实 Provider。
-## 后续环境
-
-- Scheduler/Worker 窗口可直接使用已启动的 Redis，并读取 REDIS_URL。
-- 结果持久化窗口可直接使用已启动的私有 MinIO bucket，并读取 MINIO_ENDPOINT、访问凭据和 MINIO_BUCKET。
-- Provider 冒烟测试前：在本地配置 `DASHSCOPE_API_KEY` 和 `DASHSCOPE_API_HOST`，不得提交真实值。
-- 前端工作区已建立于 frontend/，Node 版本固定为 24.18.0，使用 npm。
-
-
-## 真实 Provider 与受控冒烟测试
-
-正式 Adapter 位于 backend/src/museflow/providers.py，通过 GenerationProvider 接口由 Worker 调用。默认 MUSEFLOW_PROVIDER=mock，普通测试和 Demo 不访问真实 Provider；需要本地受控运行时才设置 MUSEFLOW_PROVIDER=dashscope。
-
-DashScope 只从本地进程环境读取 DASHSCOPE_API_KEY 和 DASHSCOPE_API_HOST，不要写入源码、日志、文档或提交。Adapter 固定使用 wan2.6-t2i、n=1、size=1280*1280 和 prompt_extend=false，只执行一次创建请求；429、5xx、网络超时和轮询超时交给现有应用重试语义，不能在 Adapter 内部重发创建请求。
-
-远端任务 ID 由执行层关联到 attempt。结果 URL 经过主机白名单、重定向逐跳校验、网络地址拒绝、流式大小限制、Content-Type、文件头和尺寸校验后才写入私有 MinIO。Provider 不提供 exactly-once；远端已受理但响应丢失时仍可能发生重复调用和费用。
-
-受控冒烟测试不会因为环境变量存在而自动运行。先运行 uv run --directory backend python -m museflow.dashscope_smoke，该命令只检查变量存在并明确不发请求。只有再次确认北京地域/工作空间、模型权限、计费权限、单次最多约 ¥0.20、不得自动重试和遇错立即停止后，才显式追加 --authorize-real-request。日常 pytest、Compose Demo 和 CI 继续只使用 MockProvider。
-
-### 第 5 个窗口结果 URL 核查
-
-Wan2.6 新异步协议的成功结果字段为 `output.choices[].message.content[].image`；适配器同时兼容已记录的旧 `output.results[].url` 结构。缺少可解析结果 URL 时仍返回永久错误并停止，不把任务标记为成功。
-
-官方北京示例结果主机仍在精确白名单中。阿里云售后工程师按北京地域 `wan2.6-t2i` 的既有请求核对，确认成功图片结果使用 `dashscope-a717.oss-accelerate.aliyuncs.com`；该主机与先前保存的摘要 `0bd1575e39cb` 一致，因此只增加这一精确主机，不允许任意 OSS 域名或后缀。工程师随后确认 `dashscope-a717` Bucket 实际存储于北京；这是厂商确认，而非从加速域名推断。安全下载器继续逐跳校验重定向、DNS 网络地址、响应大小、媒体类型、文件头和尺寸。
-
-2026-09-19 的单次授权冒烟已完成真实 Provider 提交、轮询、安全下载、PNG 类型/文件头/尺寸/大小及 SHA-256 校验、私有 MinIO 写入与签名下载；签名下载 200，匿名读取及过期签名均为 403。默认 MockProvider、普通测试和 Demo 不变。此前截图出现过 API Key 片段，仍建议轮换；每次后续真实请求都须重新取得明确授权。
+- `/tasks/new`：文生图和单参考图图生图。
+- `/tasks/:taskId`：任务状态、Provider 快照、Attempt、时间线、参考素材、结果与手动重试链。
+- `/tasks`：任务历史、generation type 与状态组合筛选，以及后端 cursor 分页。

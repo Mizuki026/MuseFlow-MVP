@@ -1,0 +1,12 @@
+services:
+  api:
+    environment:
+      MUSEFLOW_PROVIDER: dashscope
+      DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:?Set DASHSCOPE_API_KEY only after explicit per-request authorization}
+      DASHSCOPE_API_HOST: ${DASHSCOPE_API_HOST:?Set DASHSCOPE_API_HOST to the authorized Beijing workspace}
+
+  worker:
+    environment:
+      MUSEFLOW_PROVIDER: dashscope
+      DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:?Set DASHSCOPE_API_KEY only after explicit per-request authorization}
+      DASHSCOPE_API_HOST: ${DASHSCOPE_API_HOST:?Set DASHSCOPE_API_HOST to the authorized Beijing workspace}

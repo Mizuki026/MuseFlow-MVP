@@ -11,7 +11,7 @@ services:
       timeout: 3s
       retries: 15
     ports:
-      - "127.0.0.1:55432:5432"
+      - "127.0.0.1:${MUSEFLOW_POSTGRES_PORT:-55432}:5432"
     volumes:
       - museflow-postgres:/var/lib/postgresql/data
 
@@ -24,7 +24,7 @@ services:
       timeout: 3s
       retries: 15
     ports:
-      - "127.0.0.1:6379:6379"
+      - "127.0.0.1:${MUSEFLOW_REDIS_PORT:-6379}:6379"
     volumes:
       - museflow-redis:/data
 
@@ -35,8 +35,8 @@ services:
       MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-minioadmin}
       MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-minioadmin}
     ports:
-      - "127.0.0.1:9000:9000"
-      - "127.0.0.1:9001:9001"
+      - "127.0.0.1:${MUSEFLOW_MINIO_PORT:-9000}:9000"
+      - "127.0.0.1:${MUSEFLOW_MINIO_CONSOLE_PORT:-9001}:9001"
     volumes:
       - museflow-minio:/data
     healthcheck:
@@ -47,8 +47,6 @@ services:
 
   minio-init:
     image: quay.io/minio/mc@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727
-    depends_on:
-      - minio
     entrypoint: ["/bin/sh", "-c"]
     command:
       - >-
@@ -59,6 +57,9 @@ services:
       MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
       MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
       MINIO_BUCKET: ${MINIO_BUCKET:-museflow-results}
+    depends_on:
+      minio:
+        condition: service_healthy
 
   migrate:
     build: ./backend
@@ -79,16 +80,18 @@ services:
       MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
       MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
       MINIO_BUCKET: ${MINIO_BUCKET:-museflow-results}
-      MINIO_PUBLIC_ENDPOINT: ${MINIO_PUBLIC_ENDPOINT:-http://127.0.0.1:9000}
+      MINIO_PUBLIC_ENDPOINT: ${MINIO_PUBLIC_ENDPOINT:-http://127.0.0.1:${MUSEFLOW_MINIO_PORT:-9000}}
+      MUSEFLOW_PROVIDER: mock
       MUSEFLOW_DEMO_MODE: "true"
-      MUSEFLOW_CORS_ORIGINS: http://127.0.0.1:5173,http://localhost:5173,http://127.0.0.1:4173,http://localhost:4173
     depends_on:
       migrate:
         condition: service_completed_successfully
       minio-init:
         condition: service_completed_successfully
+      redis:
+        condition: service_healthy
     ports:
-      - "127.0.0.1:8000:8000"
+      - "127.0.0.1:${MUSEFLOW_API_PORT:-8000}:8000"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health/ready')"]
       interval: 5s
@@ -103,6 +106,8 @@ services:
       REDIS_URL: redis://redis:6379/0
       SCHEDULER_INTERVAL_SECONDS: "1"
     depends_on:
+      postgres:
+        condition: service_healthy
       migrate:
         condition: service_completed_successfully
       redis:
@@ -125,10 +130,10 @@ services:
       MINIO_BUCKET: ${MINIO_BUCKET:-museflow-results}
       MUSEFLOW_LEASE_SECONDS: ${MUSEFLOW_LEASE_SECONDS:-240}
       MUSEFLOW_HEARTBEAT_INTERVAL_SECONDS: ${MUSEFLOW_HEARTBEAT_INTERVAL_SECONDS:-30}
-      MUSEFLOW_PROVIDER: ${MUSEFLOW_PROVIDER:-mock}
-      DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
-      DASHSCOPE_API_HOST: ${DASHSCOPE_API_HOST:-}
+      MUSEFLOW_PROVIDER: mock
     depends_on:
+      postgres:
+        condition: service_healthy
       migrate:
         condition: service_completed_successfully
       redis:
@@ -152,6 +157,8 @@ services:
       MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
       MINIO_BUCKET: ${MINIO_BUCKET:-museflow-results}
     depends_on:
+      postgres:
+        condition: service_healthy
       migrate:
         condition: service_completed_successfully
       redis:
@@ -163,6 +170,23 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+
+  web:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_API_BASE_URL: /api/v1
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${MUSEFLOW_WEB_PORT:-5173}:80"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 8
 
 volumes:
   museflow-postgres:
