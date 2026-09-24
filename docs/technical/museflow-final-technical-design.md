@@ -648,6 +648,15 @@ Playwright 使用 `MockProvider` 覆盖：
 
 验收：旧 Worker 只能留下非权威候选，数据库 checksum 与获胜对象始终一致。
 
+阶段 1 实施记录：
+
+- `assets.result_identity()` 从图片字节识别 PNG/JPEG/WebP，并要求结果媒体声明与识别格式一致；SHA-256 直接从这些字节计算。候选键集中生成：`results/{task_id}/{attempt_id}/candidates/{sha256}.{ext}`。
+- Worker 先通过 `ResultAssetStore` 写候选，再进入数据库事务；事务按 task、attempt 顺序加行锁，使用当前 execution token、lease、attempt/task 状态做 fencing 判断。
+- 同一 attempt、同一候选的重复发布返回幂等结果；已有不同权威指针返回冲突，不更新对象键或 checksum。通过 fencing 的事务插入 `result_assets`、完成 attempt/task 并写成功事件；现有 `uq_result_assets_task_role` 保持每任务一个权威结果。
+- `ExecutionOutcome` 明确区分已发布、重复发布、已失去 ownership 和冲突；已失去 ownership 的 Worker 可留下候选，但不会创建任务结果指针。候选写入与数据库事务分离，未宣称 PostgreSQL 与 MinIO 原子提交。
+- 不新增 migration 或候选表。旧 `result_assets.object_key` 由现有详情/下载路径读取，因此历史 `.../0.png` 对象无需搬迁。非权威候选清理由后续隔离维护任务负责。
+- 本窗口未实施 Lease heartbeat；lease heartbeat、稳定执行阶段和错误责任域属于阶段 2。
+
 ### 阶段 2：Lease heartbeat 与执行语义
 
 - 实现 `LeaseGuard`、稳定 attempt phase 和错误责任域。
@@ -753,19 +762,25 @@ Playwright 使用 `MockProvider` 覆盖：
 - 创建、详情、历史三个正式前端页面及 OpenAPI 类型生成。
 - MVP 单元、集成、故障恢复和端到端测试。
 
-阶段 0 已完成并得出 `CONDITIONAL GO`。下一步从阶段 1 开始实施不可变结果候选与 fencing、lease heartbeat；按实施阶段再进入数据库迁移、参考素材和 Provider Adapter。正式接入真实结果下载前必须先实现满足阶段 0 报告安全条件的 `SafeArtifactFetcher`，不得在 P0 可靠性缺口修复前扩展图生图任务。
+阶段 0 已完成并得出 `CONDITIONAL GO`；阶段 1 的不可变候选和数据库权威结果 fencing 已完成。下一步进入阶段 2，单独实施 Lease heartbeat、稳定执行阶段和错误责任域。阶段 2 完成后再进入兼容数据迁移、参考素材和 Provider Adapter。正式接入真实结果下载前必须先实现满足阶段 0 报告安全条件的 `SafeArtifactFetcher`，不得在 P0 可靠性缺口修复前扩展图生图任务。
 
 产品与架构决策已经在 2026-09-24 的审查中收敛。每次真实图生图请求仍需要单独确认账号、地域、费用、请求参数和单次授权；文档结论本身不构成付费调用授权。
 
 ## 21. 验证记录
 
-本版本为技术方案文档，不包含行为代码修改。交付时应完成：
+### 阶段 1 验证记录
 
-- Markdown 格式和行尾空白检查。
-- 本地文档链接存在性检查。
-- Git diff 检查，确保不包含无关改动。
+- 修改前基线：使用本窗口创建的隔离 PostgreSQL/MinIO 服务，执行 `uv run pytest tests/unit/test_retry_and_assets.py tests/unit/test_secure_result_boundaries.py tests/integration/test_async_pipeline.py tests/integration/test_retry_recovery.py -vv`，结果 `25 passed`。
+- 核心回归：`uv run pytest tests/unit/test_retry_and_assets.py tests/integration/test_result_publication.py tests/integration/test_retry_recovery.py tests/api/test_tasks_api.py::test_historical_result_asset_still_downloads_from_its_saved_object_key -vv`，结果 `23 passed`。其中 PostgreSQL/MinIO 覆盖旧 Worker 晚写、lease 在候选写入后失效、发布事务失败后同 attempt 恢复、同内容并发写入和重复发布。
+- 全量后端测试：在 PostgreSQL 和 MinIO 可用、启用 `MUSEFLOW_RUN_RESULT_PUBLICATION_INTEGRATION=1` 与 `MUSEFLOW_RUN_REAL_MINIO_TEST=1` 时执行 `uv run pytest -q`，结果 `86 passed, 2 skipped`。跳过的是需要独立 Redis/Scheduler/Worker 的 Compose E2E 与真实 Redis Worker 测试；有 2 条现有 Starlette/httpx 与 AnyIO 弃用警告。
+- `uv run ruff check src tests`：通过。
+- `uv run pyright`：`0 errors, 0 warnings, 0 informations`。
+- `uv run python -m compileall -q src tests`：通过。
+- `uv run alembic check`：`No new upgrade operations detected`，无需 schema migration。
+- `docker compose config --quiet`：通过；`git diff --check`：通过。
+- 实现提交：`e469a21dd624d3f774236fc326634be82db40105`（`fix: 使用不可变候选保护权威结果`）。文档同步提交 SHA 与最终工作区状态由交付报告记录。
 
-各实施阶段的代码、测试和真实 Provider 验收结果应在完成对应阶段后更新本节或相关专项记录，不预先声称通过。
+正式 Provider Adapter 仍受阶段 0 `SafeArtifactFetcher` 部署前置条件约束；本窗口未实现该 fetcher、lease heartbeat、参考素材或图生图 schema。
 
 ## 22. 参考资料
 
