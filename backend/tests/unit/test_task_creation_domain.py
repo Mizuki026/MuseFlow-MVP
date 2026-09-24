@@ -1,8 +1,13 @@
 from datetime import UTC, datetime
 from uuid import uuid4
 
+import pytest
+
 from museflow.tasks.domain import (
     CreateTaskRequest,
+    DomainErrorCode,
+    DomainValidationError,
+    GenerationType,
     TaskPolicy,
     TaskStatus,
     create_queued_task,
@@ -29,3 +34,37 @@ def test_create_queued_task_captures_policy_snapshot_and_queued_state() -> None:
     assert task.max_attempts == 3
     assert task.policy_version == "2026-09-18"
     assert task.deadline_at == datetime(2026, 9, 18, 12, 10, tzinfo=UTC)
+    assert task.generation_type is GenerationType.TEXT_TO_IMAGE
+    assert task.policy_snapshot["frozen"] is True
+    assert task.policy_snapshot["retry_policy"] == {
+        "initial_delay_seconds": 2.0,
+        "multiplier": 2.0,
+        "max_delay_seconds": 30.0,
+    }
+
+
+def test_omitted_and_explicit_text_generation_type_have_the_same_normalized_fingerprint() -> None:
+    omitted = normalize_create_request(CreateTaskRequest(prompt="same request"))
+    explicit = normalize_create_request(
+        CreateTaskRequest(prompt="same request", generation_type=GenerationType.TEXT_TO_IMAGE)
+    )
+
+    assert omitted == explicit
+
+
+def test_image_to_image_is_rejected_until_its_creation_use_case_exists() -> None:
+    with pytest.raises(DomainValidationError) as error:
+        normalize_create_request(
+            CreateTaskRequest(prompt="edit this", generation_type=GenerationType.IMAGE_TO_IMAGE)
+        )
+
+    assert error.value.code is DomainErrorCode.GENERATION_TYPE_UNSUPPORTED
+
+
+def test_text_to_image_does_not_accept_reference_asset_fields() -> None:
+    with pytest.raises(DomainValidationError) as error:
+        normalize_create_request(
+            CreateTaskRequest(prompt="draw this", reference_sha256="a" * 64)
+        )
+
+    assert error.value.code is DomainErrorCode.REFERENCE_ASSET_NOT_ALLOWED

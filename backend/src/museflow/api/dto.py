@@ -6,7 +6,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict
 
 from museflow.providers import MockScenario
-from museflow.tasks.domain import TaskStatus
+from museflow.tasks.domain import GenerationType, TaskStatus
 from museflow.tasks.execution_models import GenerationAttemptModel
 from museflow.tasks.repository import EventRecord, TaskRecord
 
@@ -15,6 +15,9 @@ class CreateTaskBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     prompt: str
+    generation_type: GenerationType = GenerationType.TEXT_TO_IMAGE
+    reference_asset_id: UUID | None = None
+    reference_sha256: str | None = None
 
 
 class DemoCreateTaskBody(CreateTaskBody):
@@ -70,6 +73,8 @@ class TaskAssetResponse(BaseModel):
     role: str
     content_type: str
     size_bytes: int
+    width: int | None = None
+    height: int | None = None
     sha256: str
     download_url: str | None = None
 
@@ -78,6 +83,7 @@ class TaskSummaryResponse(BaseModel):
     id: UUID
     prompt: str
     size_preset: str
+    generation_type: GenerationType | None = None
     status: TaskStatus
     max_attempts: int
     deadline_at: datetime
@@ -97,6 +103,7 @@ class TaskSummaryResponse(BaseModel):
             id=task.id,
             prompt=task.prompt,
             size_preset=task.size_preset,
+            generation_type=task.generation_type,
             status=task.status,
             max_attempts=task.max_attempts,
             deadline_at=task.deadline_at,

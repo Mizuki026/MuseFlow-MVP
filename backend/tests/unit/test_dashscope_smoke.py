@@ -42,6 +42,8 @@ class _Store:
             content_type,
             len(content),
             hashlib.sha256(content).hexdigest(),
+            1280,
+            1280,
         )
 
     def presigned_download(self, object_key: str, *, expires_seconds: int = 300) -> str:

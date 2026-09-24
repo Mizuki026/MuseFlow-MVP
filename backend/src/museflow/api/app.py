@@ -27,6 +27,7 @@ from museflow.api.dto import (
 from museflow.assets import MinioResultAssetStore, ResultAssetStore
 from museflow.db.models import GenerationTaskModel, ResultAssetModel
 from museflow.db.session import create_session_factory
+from museflow.provider_profiles import ProviderProfileUnavailableError
 from museflow.tasks.application import (
     CreateTask,
     GetTaskDetail,
@@ -35,10 +36,16 @@ from museflow.tasks.application import (
     ManualRetryNotAllowedError,
     TaskNotFoundError,
 )
-from museflow.tasks.domain import CreateTaskRequest, DomainValidationError, TaskStatus
+from museflow.tasks.domain import (
+    CreateTaskRequest,
+    DomainValidationError,
+    ProviderTaskSnapshot,
+    TaskPolicy,
+    TaskStatus,
+)
 from museflow.tasks.execution_models import GenerationAttemptModel
 
-EXPECTED_MIGRATION_REVISION = "0004_demo_execution_profiles"
+EXPECTED_MIGRATION_REVISION = "0006_compatibility_constraints"
 DEFAULT_DATABASE_URL = "postgresql+psycopg://postgres:postgres@localhost:5432/museflow"
 
 
@@ -137,6 +144,15 @@ def create_app(
     ) -> JSONResponse:
         return _error_response(request, ApiError(409, "RETRY_NOT_ALLOWED", str(error)))
 
+    @app.exception_handler(ProviderProfileUnavailableError)
+    async def handle_provider_profile_unavailable(
+        request: Request, error: ProviderProfileUnavailableError
+    ) -> JSONResponse:
+        return _error_response(
+            request,
+            ApiError(503, "PROVIDER_PROFILE_UNAVAILABLE", str(error)),
+        )
+
     @app.exception_handler(RequestValidationError)
     async def handle_request_validation(
         request: Request, error: RequestValidationError
@@ -163,7 +179,13 @@ def create_app(
         if not idempotency_key:
             raise ApiError(400, "IDEMPOTENCY_KEY_REQUIRED", "Idempotency-Key is required")
         result = create_task.execute(
-            CreateTaskRequest(prompt=body.prompt), idempotency_key=idempotency_key
+            CreateTaskRequest(
+                prompt=body.prompt,
+                generation_type=body.generation_type,
+                reference_asset_id=body.reference_asset_id,
+                reference_sha256=body.reference_sha256,
+            ),
+            idempotency_key=idempotency_key,
         )
         response = TaskSummaryResponse.from_record(result.task)
         return JSONResponse(
@@ -192,8 +214,20 @@ def create_app(
             if not idempotency_key:
                 raise ApiError(400, "IDEMPOTENCY_KEY_REQUIRED", "Idempotency-Key is required")
             result = create_task.execute(
-                CreateTaskRequest(prompt=body.prompt, execution_profile=body.scenario.value),
+                CreateTaskRequest(
+                    prompt=body.prompt,
+                    execution_profile=body.scenario.value,
+                    generation_type=body.generation_type,
+                    reference_asset_id=body.reference_asset_id,
+                    reference_sha256=body.reference_sha256,
+                ),
                 idempotency_key=idempotency_key,
+                provider_snapshot=ProviderTaskSnapshot(
+                    profile="mock-text-to-image-v1",
+                    provider_name="mock",
+                    model_name="mock-deterministic-image",
+                    capability_version="text-to-image-v1",
+                ),
             )
             response = TaskSummaryResponse.from_record(result.task)
             return JSONResponse(
@@ -238,6 +272,8 @@ def create_app(
                 role=asset.role,
                 content_type=asset.content_type,
                 size_bytes=asset.size_bytes,
+                width=asset.width,
+                height=asset.height,
                 sha256=asset.sha256,
                 download_url=f"/api/v1/assets/{asset.id}/download",
             )
@@ -264,9 +300,29 @@ def create_app(
                 prompt=source.task.prompt,
                 size_preset=source.task.size_preset,
                 execution_profile=source.task.execution_profile,
+                generation_type=source.task.generation_type,
+                reference_asset_id=source.task.reference_asset_id,
+                reference_sha256=source.task.reference_sha256,
             ),
             idempotency_key,
             retried_from_task_id=task_id,
+            provider_snapshot=ProviderTaskSnapshot(
+                profile=source.task.provider_profile,
+                provider_name=source.task.provider_name,
+                model_name=source.task.model_name,
+                capability_version=source.task.capability_version,
+            ),
+            policy=TaskPolicy(
+                max_attempts=source.task.max_attempts,
+                policy_version=source.task.policy_version,
+                deadline_seconds=int(
+                    source.task.policy_snapshot.get(
+                        "deadline_seconds",
+                        (source.task.deadline_at - source.task.created_at).total_seconds(),
+                    )
+                ),
+            ),
+            policy_snapshot=source.task.policy_snapshot,
         )
         summary = TaskSummaryResponse.from_record(result.task)
         return JSONResponse(

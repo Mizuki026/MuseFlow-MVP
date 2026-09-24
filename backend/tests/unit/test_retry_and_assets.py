@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import struct
 from uuid import uuid4
 
 import pytest
@@ -14,6 +15,15 @@ from museflow.tasks.result_publication import (
 )
 
 
+def _png(width: int = 1, height: int = 1) -> bytes:
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + b"\x00\x00\x00\rIHDR"
+        + struct.pack(">II", width, height)
+        + b"\x08\x02\x00\x00\x00"
+    )
+
+
 def test_retry_policy_is_exponential_full_jitter_and_bounded() -> None:
     policy = RetryPolicy()
 
@@ -23,7 +33,7 @@ def test_retry_policy_is_exponential_full_jitter_and_bounded() -> None:
 
 
 def test_result_validation_records_checksum_and_rejects_mismatched_header() -> None:
-    content = b"\x89PNG\r\n\x1a\nvalid-payload"
+    content = _png()
 
     content_type, size, checksum = validate_result(content, "image/png")
 
@@ -32,12 +42,14 @@ def test_result_validation_records_checksum_and_rejects_mismatched_header() -> N
     assert len(checksum) == 64
     with pytest.raises(ValueError, match="header"):
         validate_result(b"not-an-image", "image/png")
+    with pytest.raises(ValueError, match="header is incomplete"):
+        validate_result(b"\x89PNG\r\n\x1a\ntruncated", "image/png")
 
 
 def test_result_candidate_key_uses_task_attempt_content_digest_and_detected_format() -> None:
     task_id = uuid4()
     attempt_id = uuid4()
-    content = b"\x89PNG\r\n\x1a\nactual png bytes"
+    content = _png(3, 2)
     identity = result_identity(content, "image/png")
 
     assert identity.sha256 == hashlib.sha256(content).hexdigest()
@@ -49,9 +61,9 @@ def test_result_candidate_key_uses_task_attempt_content_digest_and_detected_form
 def test_same_candidate_content_is_stable_and_different_content_gets_different_key() -> None:
     task_id = uuid4()
     attempt_id = uuid4()
-    first = result_identity(b"\x89PNG\r\n\x1a\nfirst", "image/png")
-    repeated = result_identity(b"\x89PNG\r\n\x1a\nfirst", "image/png")
-    second = result_identity(b"\x89PNG\r\n\x1a\nsecond", "image/png")
+    first = result_identity(_png() + b"first", "image/png")
+    repeated = result_identity(_png() + b"first", "image/png")
+    second = result_identity(_png() + b"second", "image/png")
 
     assert candidate_object_key(task_id, attempt_id, first) == candidate_object_key(
         task_id, attempt_id, repeated
@@ -64,15 +76,16 @@ def test_same_candidate_content_is_stable_and_different_content_gets_different_k
 def test_candidate_extension_comes_from_verified_bytes_not_untrusted_media_claim() -> None:
     task_id = uuid4()
     attempt_id = uuid4()
-    jpeg = result_identity(b"\xff\xd8\xffjpeg bytes", "image/jpeg")
+    jpeg_content = b"\xff\xd8\xff\xc0\x00\x07\x08\x00\x01\x00\x01"
+    jpeg = result_identity(jpeg_content, "image/jpeg")
 
     assert candidate_object_key(task_id, attempt_id, jpeg).endswith(
-        f"/{hashlib.sha256(b'\xff\xd8\xffjpeg bytes').hexdigest()}.jpg"
+        f"/{hashlib.sha256(jpeg_content).hexdigest()}.jpg"
     )
     with pytest.raises(ValueError, match="does not match"):
-        result_identity(b"\x89PNG\r\n\x1a\npng bytes", "image/jpeg")
+        result_identity(_png(), "image/jpeg")
     with pytest.raises(ValueError, match="unsupported"):
-        result_identity(b"\x89PNG\r\n\x1a\npng bytes", "image/x-untrusted")
+        result_identity(_png(), "image/x-untrusted")
 
 
 def test_publication_fences_a_claim_with_a_mismatched_execution_token() -> None:

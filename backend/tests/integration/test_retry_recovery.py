@@ -223,6 +223,8 @@ class FailingResultStore:
             content_type=identity.content_type,
             size_bytes=identity.size_bytes,
             sha256=identity.sha256,
+            width=identity.width,
+            height=identity.height,
         )
 
     def presigned_download(self, object_key: str, *, expires_seconds: int = 300) -> str:
@@ -360,6 +362,8 @@ class CrashAfterUploadStore:
             content_type=identity.content_type,
             size_bytes=identity.size_bytes,
             sha256=identity.sha256,
+            width=identity.width,
+            height=identity.height,
         )
         self.written_keys.add(stored.object_key)
         if self.puts == 1:

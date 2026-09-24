@@ -11,17 +11,15 @@ from sqlalchemy.orm import Session, sessionmaker
 from museflow.assets import MinioResultAssetStore
 from museflow.db.models import GenerationTaskModel
 from museflow.db.session import create_session_factory
-from museflow.providers import MockProvider, create_provider_from_environment
+from museflow.providers import create_provider_for_task
 from museflow.queue import create_celery_app
 from museflow.runtime import worker_runtime_probe
 from museflow.tasks.execution import ExecuteGenerationAttempt
-from museflow.tasks.execution_semantics import LeaseSettings
 from museflow.tasks.result_publication import ResultPublicationStatus
 
 logger = logging.getLogger(__name__)
 
 celery_app: Celery = create_celery_app()
-_LEASE_SETTINGS = LeaseSettings.from_environment()
 
 
 def _session_factory() -> sessionmaker[Session]:
@@ -37,14 +35,29 @@ def execute_task(task_id: str) -> None:
     factory = _session_factory()
     with factory() as session:
         task = session.get(GenerationTaskModel, UUID(task_id))
-        scenario = task.execution_profile if task is not None else None
-    provider = MockProvider(scenario=scenario) if scenario else create_provider_from_environment()
+        profile_values = (
+            (
+                task.provider_profile,
+                task.provider_name,
+                task.model_name,
+                task.capability_version,
+                task.execution_profile,
+            )
+            if task is not None
+            else ("", "", "", "", None)
+        )
+    provider = create_provider_for_task(
+        profile_id=profile_values[0],
+        provider_name=profile_values[1],
+        model_name=profile_values[2],
+        capability_version=profile_values[3],
+        execution_profile=profile_values[4],
+    )
     try:
         outcome = ExecuteGenerationAttempt(
             factory,
             provider,
             asset_store=MinioResultAssetStore(),
-            lease_settings=_LEASE_SETTINGS,
         ).execute(UUID(task_id))
         if outcome.publication_status is ResultPublicationStatus.OWNERSHIP_LOST:
             logger.info(

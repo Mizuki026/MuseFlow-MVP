@@ -5,6 +5,7 @@ import random
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
+from typing import cast
 from uuid import UUID, uuid4
 
 from sqlalchemy import select
@@ -64,6 +65,8 @@ class ExecutionClaim:
     provider_request_key: str
     remote_request_id: str | None
     request: GenerationRequest
+    lease_settings: LeaseSettings
+    retry_policy: RetryPolicy
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,7 +88,7 @@ class ExecuteGenerationAttempt:
         *,
         asset_store: ResultAssetStore | None = None,
         clock: Callable[[], datetime] | None = None,
-        lease_seconds: int = 240,
+        lease_seconds: int | None = None,
         heartbeat_interval_seconds: float | None = None,
         lease_settings: LeaseSettings | None = None,
         token_factory: Callable[[], UUID] = uuid4,
@@ -96,13 +99,19 @@ class ExecuteGenerationAttempt:
         self._provider = provider
         self._asset_store = asset_store
         self._clock = clock or (lambda: datetime.now(UTC))
-        if lease_settings is None:
-            heartbeat = heartbeat_interval_seconds or min(30.0, lease_seconds / 3)
-            lease_settings = LeaseSettings(lease_seconds, heartbeat)
-        self._lease_settings = lease_settings
+        self._lease_settings_override = lease_settings
+        if lease_settings is None and (
+            lease_seconds is not None or heartbeat_interval_seconds is not None
+        ):
+            effective_lease_seconds = lease_seconds or 240
+            heartbeat = heartbeat_interval_seconds or min(30.0, effective_lease_seconds / 3)
+            lease_settings = LeaseSettings(effective_lease_seconds, heartbeat)
+            self._lease_settings_override = lease_settings
+        self._fallback_lease_settings = lease_settings or LeaseSettings.from_environment()
         self._token_factory = token_factory
         self._random_source = random_source
-        self._retry_policy = retry_policy or RetryPolicy()
+        self._retry_policy_override = retry_policy
+        self._fallback_retry_policy = retry_policy or RetryPolicy()
 
     def execute(self, task_id: UUID) -> ExecutionOutcome:
         claim = self._claim(task_id)
@@ -116,7 +125,7 @@ class ExecuteGenerationAttempt:
             attempt_id=claim.attempt_id,
             execution_token=claim.execution_token,
             deadline_at=deadline_at,
-            settings=self._lease_settings,
+            settings=claim.lease_settings,
             clock=self._clock,
         )
         current_phase = claim.phase
@@ -263,6 +272,8 @@ class ExecuteGenerationAttempt:
             content_type=identity.content_type,
             size_bytes=identity.size_bytes,
             sha256=identity.sha256,
+            width=identity.width,
+            height=identity.height,
         )
         stored = self._asset_store.put_result(
             task_id=claim.task_id,
@@ -357,6 +368,7 @@ class ExecuteGenerationAttempt:
             if task.deadline_at <= now:
                 self._mark_deadline_locked(session, task, now, latest)
                 return None
+            lease_settings, retry_policy = self._execution_policy(task.policy_snapshot)
             if latest is not None and latest.status == "SUCCEEDED":
                 return None
             if latest is not None and latest.status == "RUNNING" and latest.lease_expires_at > now:
@@ -386,12 +398,12 @@ class ExecuteGenerationAttempt:
                     sequence=sequence,
                     status="RUNNING",
                     phase=AttemptPhase.INPUT_LOADING.value,
-                    provider_name=getattr(self._provider, "name", "mock"),
+                    provider_name=task.provider_name,
                     provider_request_key=f"{task_id}:attempt:{sequence}",
                     provider_request_id=None,
                     execution_token=self._token_factory(),
                     lease_expires_at=min(
-                        now + timedelta(seconds=self._lease_settings.lease_seconds),
+                        now + timedelta(seconds=lease_settings.lease_seconds),
                         task.deadline_at,
                     ),
                     started_at=now,
@@ -404,7 +416,7 @@ class ExecuteGenerationAttempt:
                 attempt.status = "RUNNING"
                 attempt.execution_token = self._token_factory()
                 attempt.lease_expires_at = min(
-                    now + timedelta(seconds=self._lease_settings.lease_seconds), task.deadline_at
+                    now + timedelta(seconds=lease_settings.lease_seconds), task.deadline_at
                 )
                 attempt.error_code = None
                 attempt.error_message = None
@@ -443,7 +455,50 @@ class ExecuteGenerationAttempt:
                     size_preset=task.size_preset,
                     deadline_at=task.deadline_at,
                 ),
+                lease_settings=lease_settings,
+                retry_policy=retry_policy,
             )
+
+    def _execution_policy(
+        self, policy_snapshot: dict[str, object]
+    ) -> tuple[LeaseSettings, RetryPolicy]:
+        if policy_snapshot.get("frozen") is not True:
+            return self._fallback_lease_settings, self._fallback_retry_policy
+
+        lease_values = policy_snapshot.get("lease_settings")
+        retry_values = policy_snapshot.get("retry_policy")
+        if not isinstance(lease_values, dict) or not isinstance(retry_values, dict):
+            raise ValueError("task policy snapshot is incomplete")
+        lease_values = cast(dict[str, object], lease_values)
+        retry_values = cast(dict[str, object], retry_values)
+        try:
+            lease_settings = LeaseSettings(
+                lease_seconds=self._snapshot_number(lease_values, "lease_seconds"),
+                heartbeat_interval_seconds=self._snapshot_number(
+                    lease_values, "heartbeat_interval_seconds"
+                ),
+            )
+            retry_policy = RetryPolicy(
+                initial_delay_seconds=self._snapshot_number(
+                    retry_values, "initial_delay_seconds"
+                ),
+                multiplier=self._snapshot_number(retry_values, "multiplier"),
+                max_delay_seconds=self._snapshot_number(retry_values, "max_delay_seconds"),
+            )
+        except (KeyError, TypeError, ValueError) as error:
+            raise ValueError("task policy snapshot is invalid") from error
+        if self._lease_settings_override is not None:
+            lease_settings = self._lease_settings_override
+        if self._retry_policy_override is not None:
+            retry_policy = self._retry_policy_override
+        return lease_settings, retry_policy
+
+    @staticmethod
+    def _snapshot_number(values: dict[str, object], key: str) -> float:
+        value = values.get(key)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(f"task policy snapshot field {key} is invalid")
+        return float(value)
 
     @staticmethod
     def _stored_phase(phase: str, attempt_status: str) -> AttemptPhase:
@@ -604,6 +659,8 @@ class ExecuteGenerationAttempt:
                         content_type=stored.content_type,
                         size_bytes=stored.size_bytes,
                         sha256=stored.sha256,
+                        width=stored.width,
+                        height=stored.height,
                         created_at=now,
                     )
                 )
@@ -771,7 +828,7 @@ class ExecuteGenerationAttempt:
             attempt.finished_at = now
             next_at = now
             if retryable:
-                delay = self._retry_policy.delay_seconds(claim.sequence, self._random_source())
+                delay = claim.retry_policy.delay_seconds(claim.sequence, self._random_source())
                 next_at = now + timedelta(seconds=delay)
             can_retry = can_schedule_new_attempt(
                 action=(

@@ -9,7 +9,7 @@ from sqlalchemy import Select, select
 from sqlalchemy.orm import Session
 
 from museflow.db.models import GenerationTaskModel, OutboxMessageModel, TaskEventModel
-from museflow.tasks.domain import QueuedTask, TaskStatus
+from museflow.tasks.domain import GenerationType, QueuedTask, TaskStatus
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,6 +33,14 @@ class TaskRecord:
     version: int
     retried_from_task_id: UUID | None
     execution_profile: str | None
+    generation_type: GenerationType
+    reference_asset_id: UUID | None
+    reference_sha256: str | None
+    provider_profile: str
+    provider_name: str
+    model_name: str
+    capability_version: str
+    policy_snapshot: dict[str, Any]
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,6 +84,14 @@ def _task_record(model: GenerationTaskModel) -> TaskRecord:
         version=model.version,
         retried_from_task_id=model.retried_from_task_id,
         execution_profile=model.execution_profile,
+        generation_type=GenerationType(model.generation_type),
+        reference_asset_id=model.reference_asset_id,
+        reference_sha256=model.reference_sha256,
+        provider_profile=model.provider_profile,
+        provider_name=model.provider_name,
+        model_name=model.model_name,
+        capability_version=model.capability_version,
+        policy_snapshot=model.policy_snapshot,
     )
 
 
@@ -124,6 +140,14 @@ class TaskRepository:
             version=1,
             retried_from_task_id=task.retried_from_task_id,
             execution_profile=task.execution_profile,
+            generation_type=task.generation_type.value,
+            reference_asset_id=task.reference_asset_id,
+            reference_sha256=task.reference_sha256,
+            provider_profile=task.provider_profile,
+            provider_name=task.provider_name,
+            model_name=task.model_name,
+            capability_version=task.capability_version,
+            policy_snapshot=task.policy_snapshot,
         )
         session.add(model)
         session.flush()

@@ -32,6 +32,8 @@ class StoredAsset:
     content_type: str
     size_bytes: int
     sha256: str
+    width: int
+    height: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,6 +41,8 @@ class ResultIdentity:
     content_type: str
     size_bytes: int
     sha256: str
+    width: int
+    height: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,10 +113,15 @@ def result_identity(content: bytes, claimed_content_type: str) -> ResultIdentity
 
     if claimed_content_type != detected_content_type:
         raise ValueError("result file header does not match content type")
+    width, height = _image_dimensions(content, detected_content_type)
+    if width <= 0 or height <= 0:
+        raise ValueError("result dimensions must be positive")
     return ResultIdentity(
         content_type=detected_content_type,
         size_bytes=len(content),
         sha256=hashlib.sha256(content).hexdigest(),
+        width=width,
+        height=height,
     )
 
 
@@ -370,7 +379,14 @@ class MinioResultAssetStore:
             content_type=identity.content_type,
             metadata={"x-amz-meta-sha256": identity.sha256},
         )
-        return StoredAsset(key, identity.content_type, identity.size_bytes, identity.sha256)
+        return StoredAsset(
+            key,
+            identity.content_type,
+            identity.size_bytes,
+            identity.sha256,
+            identity.width,
+            identity.height,
+        )
 
     def presigned_download(self, object_key: str, *, expires_seconds: int = 300) -> str:
         return self._signer.presigned_get_object(

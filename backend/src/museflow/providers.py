@@ -16,6 +16,10 @@ from urllib.parse import quote, urlparse
 import httpx
 
 from museflow.assets import ResultDownloadError, SecureResultDownloader
+from museflow.provider_profiles import (
+    profile_for_id,
+    selected_text_to_image_profile,
+)
 from museflow.tasks.execution_semantics import AttemptPhase
 
 DEFAULT_DASHSCOPE_API_HOST = "https://dashscope.aliyuncs.com"
@@ -595,9 +599,57 @@ class DashScopeProvider:
 
 
 def create_provider_from_environment() -> GenerationProvider:
-    name = os.environ.get("MUSEFLOW_PROVIDER", "mock").lower()
-    if name == "mock":
-        return MockProvider()
-    if name == "dashscope":
-        return DashScopeProvider()
-    raise ProviderConfigurationError(f"unsupported MUSEFLOW_PROVIDER: {name}")
+    profile = selected_text_to_image_profile()
+    return create_provider_for_task(
+        profile_id=profile.profile_id,
+        provider_name=profile.provider_name,
+        model_name=profile.model_name,
+        capability_version=profile.capability_version,
+    )
+
+
+class _UnavailableTaskProfileProvider:
+    name = "unavailable"
+
+    def generate(
+        self,
+        request: GenerationRequest,
+        *,
+        request_key: str,
+        remote_request_id: str | None,
+        on_remote_request_id: Callable[[str], None] | None = None,
+        on_phase: Callable[[AttemptPhase], None] | None = None,
+        lease_guard: LeaseChecker | None = None,
+    ) -> GenerationResult:
+        del request, request_key, remote_request_id, on_remote_request_id, on_phase, lease_guard
+        raise ProviderError(
+            "PROVIDER_PROFILE_UNAVAILABLE",
+            "the task's frozen provider profile is unavailable in this deployment",
+            retryable=False,
+        )
+
+
+def create_provider_for_task(
+    *,
+    profile_id: str,
+    provider_name: str,
+    model_name: str,
+    capability_version: str,
+    execution_profile: str | None = None,
+) -> GenerationProvider:
+    profile = profile_for_id(profile_id)
+    if (
+        profile is None
+        or profile.provider_name != provider_name
+        or profile.model_name != model_name
+        or profile.capability_version != capability_version
+    ):
+        return _UnavailableTaskProfileProvider()
+    if profile.provider_name == "mock":
+        return MockProvider(scenario=execution_profile or MockScenario.SUCCESS)
+    if profile.provider_name == "dashscope":
+        try:
+            return DashScopeProvider()
+        except ProviderConfigurationError:
+            return _UnavailableTaskProfileProvider()
+    return _UnavailableTaskProfileProvider()

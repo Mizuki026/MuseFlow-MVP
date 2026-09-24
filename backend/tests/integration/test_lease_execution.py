@@ -127,6 +127,39 @@ def test_heartbeat_keeps_long_provider_execution_owned_while_scheduler_scans(
         _cleanup(session_factory, task_id)
 
 
+def test_task_lease_policy_snapshot_survives_worker_environment_drift(
+    session_factory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MUSEFLOW_LEASE_SECONDS", "8")
+    monkeypatch.setenv("MUSEFLOW_HEARTBEAT_INTERVAL_SECONDS", "2")
+    task_id = CreateTask(session_factory).execute(
+        CreateTaskRequest(prompt="frozen lease policy"), f"lease-snapshot-{uuid4()}"
+    ).task.id
+    now = datetime.now(UTC)
+    monkeypatch.setenv("MUSEFLOW_LEASE_SECONDS", "2")
+    monkeypatch.setenv("MUSEFLOW_HEARTBEAT_INTERVAL_SECONDS", "0.5")
+    try:
+        claim = ExecuteGenerationAttempt(
+            session_factory, MockProvider(), clock=lambda: now
+        )._claim(task_id)
+
+        assert claim is not None
+        assert claim.lease_settings == LeaseSettings(
+            lease_seconds=8, heartbeat_interval_seconds=2
+        )
+        assert claim.retry_policy.delay_seconds(2, 1.0) == 4.0
+        with session_factory() as session:
+            attempt = session.scalar(
+                select(GenerationAttemptModel).where(
+                    GenerationAttemptModel.task_id == task_id
+                )
+            )
+        assert attempt is not None
+        assert attempt.lease_expires_at == now + timedelta(seconds=8)
+    finally:
+        _cleanup(session_factory, task_id)
+
+
 def test_heartbeat_is_fenced_by_token_and_task_status(session_factory) -> None:
     task_id = _create_task(session_factory)
     settings = LeaseSettings(lease_seconds=30, heartbeat_interval_seconds=5)

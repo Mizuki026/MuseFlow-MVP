@@ -12,8 +12,10 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from museflow.db.models import GenerationTaskModel
+from museflow.provider_profiles import selected_text_to_image_profile
 from museflow.tasks.domain import (
     CreateTaskRequest,
+    ProviderTaskSnapshot,
     TaskPolicy,
     TaskStatus,
     create_queued_task,
@@ -21,6 +23,7 @@ from museflow.tasks.domain import (
     request_fingerprint,
     retry_is_allowed,
 )
+from museflow.tasks.execution_semantics import LeaseSettings
 from museflow.tasks.repository import EventRecord, TaskRecord, TaskRepository
 
 
@@ -87,9 +90,16 @@ class CreateTask:
     ) -> None:
         self._session_factory = session_factory
         self._repository = repository or TaskRepository()
-        self._policy = policy or TaskPolicy(
-            max_attempts=3, policy_version="mvp-0.2", deadline_seconds=600
-        )
+        if policy is None:
+            lease_settings = LeaseSettings.from_environment()
+            policy = TaskPolicy(
+                max_attempts=3,
+                policy_version="mvp-0.2",
+                deadline_seconds=600,
+                lease_seconds=lease_settings.lease_seconds,
+                heartbeat_interval_seconds=lease_settings.heartbeat_interval_seconds,
+            )
+        self._policy = policy
         self._clock = clock or (lambda: datetime.now(UTC))
         self._id_factory = id_factory
 
@@ -99,6 +109,9 @@ class CreateTask:
         idempotency_key: str,
         *,
         retried_from_task_id: UUID | None = None,
+        provider_snapshot: ProviderTaskSnapshot | None = None,
+        policy: TaskPolicy | None = None,
+        policy_snapshot: dict[str, object] | None = None,
     ) -> CreateTaskResult:
         normalized = normalize_create_request(request)
         fingerprint = request_fingerprint(normalized)
@@ -107,13 +120,50 @@ class CreateTask:
             return self._replay_or_conflict(existing, fingerprint)
 
         created_at = self._clock()
+        selected_policy = policy or self._policy
+        selected_provider = provider_snapshot
+        selected_policy_snapshot = policy_snapshot
+        if retried_from_task_id is not None:
+            with self._session_factory() as session:
+                source = session.get(GenerationTaskModel, retried_from_task_id)
+            if source is None:
+                raise TaskNotFoundError(str(retried_from_task_id))
+            source_policy_snapshot = source.policy_snapshot
+            source_deadline_seconds = source_policy_snapshot.get(
+                "deadline_seconds", (source.deadline_at - source.created_at).total_seconds()
+            )
+            selected_policy = TaskPolicy(
+                max_attempts=source.max_attempts,
+                policy_version=source.policy_version,
+                deadline_seconds=max(1, int(source_deadline_seconds)),
+            )
+            selected_policy_snapshot = source_policy_snapshot
+            selected_provider = ProviderTaskSnapshot(
+                profile=source.provider_profile,
+                provider_name=source.provider_name,
+                model_name=source.model_name,
+                capability_version=source.capability_version,
+            )
+        if selected_provider is None:
+            profile = selected_text_to_image_profile()
+            selected_provider = ProviderTaskSnapshot(
+                profile=profile.profile_id,
+                provider_name=profile.provider_name,
+                model_name=profile.model_name,
+                capability_version=profile.capability_version,
+            )
         task = create_queued_task(
             task_id=self._id_factory(),
             idempotency_key=idempotency_key,
             request=normalized,
             created_at=created_at,
-            policy=self._policy,
+            policy=selected_policy,
             retried_from_task_id=retried_from_task_id,
+            provider_profile=selected_provider.profile,
+            provider_name=selected_provider.provider_name,
+            model_name=selected_provider.model_name,
+            capability_version=selected_provider.capability_version,
+            policy_snapshot=selected_policy_snapshot,
         )
         try:
             with self._session_factory.begin() as session:
@@ -123,6 +173,17 @@ class CreateTask:
                     )
                     if source is None:
                         raise TaskNotFoundError(str(retried_from_task_id))
+                    if (
+                        source.prompt != task.prompt
+                        or source.size_preset != task.size_preset
+                        or source.generation_type != task.generation_type.value
+                        or source.reference_asset_id != task.reference_asset_id
+                        or source.reference_sha256 != task.reference_sha256
+                        or source.execution_profile != task.execution_profile
+                    ):
+                        raise ManualRetryNotAllowedError(
+                            "manual retry must preserve the original task input"
+                        )
                     if source.status != TaskStatus.FAILED.value or not retry_is_allowed(
                         source.error_code
                     ):
