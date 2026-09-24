@@ -55,9 +55,9 @@ class ImageInspector:
             raise ImageInspectionError("IMAGE_CORRUPT", "image file is empty")
 
         actual_format = self._detect_signature(image_path)
-        actual_content_type = _FORMAT_CONTENT_TYPES.get(actual_format)
-        if actual_content_type is None:
+        if actual_format is None:
             raise ImageInspectionError("IMAGE_FORMAT_UNSUPPORTED", "image format is not supported")
+        actual_content_type = _FORMAT_CONTENT_TYPES[actual_format]
         if declared_content_type != actual_content_type:
             raise ImageInspectionError(
                 "IMAGE_CONTENT_TYPE_MISMATCH",
