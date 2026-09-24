@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any, cast
@@ -10,6 +11,9 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from museflow.db.models import OutboxMessageModel
 from museflow.queue import TaskPublisher
+from museflow.safe_logging import log_task_event
+
+logger = logging.getLogger(__name__)
 
 
 class OutboxDispatcher:
@@ -44,7 +48,16 @@ class OutboxDispatcher:
             try:
                 task_id = UUID(cast(str, message.payload["task_id"]))
                 self._publisher.publish(task_id)
-            except Exception:
+            except Exception as error:
+                log_task_event(
+                    logger,
+                    "task_outbox_delivery_failed",
+                    level=logging.ERROR,
+                    task_id=str(message.aggregate_id),
+                    error_code="OUTBOX_DELIVERY_FAILED",
+                    error_type=type(error).__name__,
+                    status="pending",
+                )
                 continue
             with self._session_factory.begin() as session:
                 result = session.execute(
@@ -57,4 +70,10 @@ class OutboxDispatcher:
                 )
             if cast(Any, getattr(result, "rowcount", 0)) == 1:
                 published += 1
+                log_task_event(
+                    logger,
+                    "task_outbox_published",
+                    task_id=str(message.aggregate_id),
+                    status="published",
+                )
         return published

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import random
+import time
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
@@ -28,6 +29,7 @@ from museflow.providers import (
     TextToImageProviderInput,
 )
 from museflow.reference_assets.access import ReferenceAssetReader, ReferenceAssetReadError
+from museflow.safe_logging import log_task_event
 from museflow.tasks.domain import (
     GenerationType,
     ImageToImageInput,
@@ -78,6 +80,9 @@ class ExecutionClaim:
     deadline_at: datetime
     lease_settings: LeaseSettings
     retry_policy: RetryPolicy
+    generation_type: str | None = None
+    provider_name: str | None = None
+    provider_profile: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -214,7 +219,20 @@ class ExecuteGenerationAttempt:
 
                 try:
                     guard.require_ownership()
+                    storage_started = time.monotonic()
                     stored = self._store_result(claim, result)
+                    log_task_event(
+                        logger,
+                        "result_candidate_written",
+                        task_id=str(claim.task_id),
+                        attempt_id=str(claim.attempt_id),
+                        generation_type=claim.generation_type,
+                        provider_name=claim.provider_name,
+                        provider_profile=claim.provider_profile,
+                        phase=AttemptPhase.RESULT_PERSISTING.value,
+                        duration_ms=(time.monotonic() - storage_started) * 1000,
+                        status="stored",
+                    )
                     guard.require_ownership()
                 except ValueError as error:
                     return self._handle_failure(
@@ -224,21 +242,25 @@ class ExecuteGenerationAttempt:
                         phase=AttemptPhase.RESULT_PERSISTING,
                         remote_request_id=current_remote_id,
                     )
-                except Exception:
+                except Exception as storage_error:
                     if guard.state is LeaseState.OWNERSHIP_LOST:
                         return self._outcome(claim, succeeded=False)
                     if guard.state is LeaseState.DEADLINE_EXCEEDED:
                         self._mark_deadline(claim)
                         return self._outcome(claim, succeeded=False, error_code="DEADLINE_EXCEEDED")
                     self._record_result_storage_failure(claim)
-                    logger.exception(
-                        "result storage failed",
-                        extra={
-                            "task_id": str(claim.task_id),
-                            "attempt_id": str(claim.attempt_id),
-                            "provider_name": getattr(self._provider, "name", "mock"),
-                            "error_code": "RESULT_STORAGE_ERROR",
-                        },
+                    log_task_event(
+                        logger,
+                        "result_candidate_write_failed",
+                        task_id=str(claim.task_id),
+                        attempt_id=str(claim.attempt_id),
+                        generation_type=claim.generation_type,
+                        provider_name=claim.provider_name,
+                        provider_profile=claim.provider_profile,
+                        phase=AttemptPhase.RESULT_PERSISTING.value,
+                        error_code="RESULT_STORAGE_ERROR",
+                        error_type=type(storage_error).__name__,
+                        recovery=True,
                     )
                     raise
 
@@ -246,6 +268,26 @@ class ExecuteGenerationAttempt:
                 # Candidate upload precedes the fenced DB transaction. A DB error leaves the
                 # attempt in RESULT_PERSISTING so the same logical attempt can be reclaimed.
                 decision = self._succeed(claim, result, stored)
+                log_task_event(
+                    logger,
+                    "result_publication_decided",
+                    task_id=str(claim.task_id),
+                    attempt_id=str(claim.attempt_id),
+                    generation_type=claim.generation_type,
+                    provider_name=claim.provider_name,
+                    provider_profile=claim.provider_profile,
+                    phase=AttemptPhase.COMPLETED.value if decision in {
+                        PublicationDecision.PUBLISHED,
+                        PublicationDecision.ALREADY_PUBLISHED,
+                    } else AttemptPhase.RESULT_PERSISTING.value,
+                    status=decision.value,
+                    error_code=(
+                        None if decision in {
+                            PublicationDecision.PUBLISHED,
+                            PublicationDecision.ALREADY_PUBLISHED,
+                        } else decision.value
+                    ),
+                )
                 succeeded = decision in {
                     PublicationDecision.PUBLISHED,
                     PublicationDecision.ALREADY_PUBLISHED,
@@ -331,6 +373,17 @@ class ExecuteGenerationAttempt:
                     created_at=now,
                 )
             )
+        log_task_event(
+            logger,
+            "attempt_phase_changed",
+            task_id=str(claim.task_id),
+            attempt_id=str(claim.attempt_id),
+            generation_type=claim.generation_type,
+            provider_name=claim.provider_name,
+            provider_profile=claim.provider_profile,
+            phase=target.value,
+            status="running",
+        )
 
     def _record_result_storage_failure(self, claim: ExecutionClaim) -> bool:
         now = self._clock()
@@ -456,6 +509,18 @@ class ExecuteGenerationAttempt:
                     created_at=now,
                 )
             )
+            log_task_event(
+                logger,
+                "attempt_recovered" if event_type == "ATTEMPT_RECLAIMED" else "attempt_started",
+                task_id=str(task_id),
+                attempt_id=str(attempt.id),
+                generation_type=task.generation_type,
+                provider_name=task.provider_name,
+                provider_profile=task.provider_profile,
+                phase=attempt.phase,
+                recovery=event_type == "ATTEMPT_RECLAIMED",
+                status="running",
+            )
             return ExecutionClaim(
                 task_id=task_id,
                 attempt_id=attempt.id,
@@ -479,6 +544,9 @@ class ExecuteGenerationAttempt:
                 deadline_at=task.deadline_at,
                 lease_settings=lease_settings,
                 retry_policy=retry_policy,
+                generation_type=task.generation_type,
+                provider_name=task.provider_name,
+                provider_profile=task.provider_profile,
             )
 
     @staticmethod
@@ -634,6 +702,18 @@ class ExecuteGenerationAttempt:
                         created_at=now,
                     )
                 )
+        log_task_event(
+            logger,
+            "provider_request_saved",
+            task_id=str(claim.task_id),
+            attempt_id=str(claim.attempt_id),
+            generation_type=claim.generation_type,
+            provider_name=claim.provider_name,
+            provider_profile=claim.provider_profile,
+            phase=AttemptPhase.PROVIDER_RUNNING.value,
+            remote_request_id=provider_request_id,
+            status="running",
+        )
 
     def _succeed(
         self, claim: ExecutionClaim, result: GenerationResult, stored: StoredAsset | None
@@ -862,6 +942,9 @@ class ExecuteGenerationAttempt:
         error_code, inferred_retryable = self._error_details(error)
         code = code or error_code
         retryable = inferred_retryable if retryable is None else retryable
+        transition_status = ""
+        transition_error_code: str | None = None
+        can_retry = False
         with self._session_factory.begin() as session:
             task = session.get(GenerationTaskModel, claim.task_id, with_for_update=True)
             attempt = session.scalar(
@@ -922,7 +1005,24 @@ class ExecuteGenerationAttempt:
                     created_at=now,
                 )
             )
-            return True
+            transition_status = task.status
+            transition_error_code = task.error_code
+        log_task_event(
+            logger,
+            "automatic_retry_scheduled" if can_retry else "task_terminal",
+            level=logging.WARNING,
+            task_id=str(claim.task_id),
+            attempt_id=str(claim.attempt_id),
+            generation_type=claim.generation_type,
+            provider_name=claim.provider_name,
+            provider_profile=claim.provider_profile,
+            phase=claim.phase.value,
+            error_code=transition_error_code,
+            recovery=can_retry,
+            status=transition_status.lower(),
+            error_type=type(error).__name__,
+        )
+        return True
 
     @staticmethod
     def _error_details(error: Exception) -> tuple[str, bool]:

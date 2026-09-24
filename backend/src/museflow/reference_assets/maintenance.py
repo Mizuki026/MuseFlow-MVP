@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -15,6 +16,7 @@ from museflow.reference_assets.service import (
     ReferenceAssetService,
     ReferenceObjectMismatchError,
 )
+from museflow.safe_logging import log_task_event
 from museflow.tasks.domain import ReferenceAssetStatus
 
 logger = logging.getLogger(__name__)
@@ -103,6 +105,7 @@ class ReferenceAssetMaintenance:
         return self._delete_pending(record, token)
 
     def _recover_staging(self, record: ReferenceAssetRecord, lease_token: UUID) -> str:
+        started_at = time.monotonic()
         try:
             self._verifier.verify_object(record)
         except BlobNotFoundError:
@@ -114,9 +117,31 @@ class ReferenceAssetMaintenance:
                     message="staged object was not found during recovery",
                     lease_token=lease_token,
                 )
+            log_task_event(
+                logger,
+                "reference_asset_staging_recovery_failed",
+                level=logging.WARNING,
+                asset_id=str(record.id),
+                error_code="STAGED_OBJECT_MISSING",
+                recovery=True,
+                maintenance_task=True,
+                status="failed",
+                duration_ms=(time.monotonic() - started_at) * 1000,
+            )
             return "failed"
         except BlobStoreUnavailable:
             self._release_after_storage_failure(record.id, lease_token, "STAGING")
+            log_task_event(
+                logger,
+                "reference_asset_staging_recovery_deferred",
+                level=logging.WARNING,
+                asset_id=str(record.id),
+                error_code="OBJECT_STORE_UNAVAILABLE",
+                recovery=True,
+                maintenance_task=True,
+                status="retry",
+                duration_ms=(time.monotonic() - started_at) * 1000,
+            )
             return "retry"
         except (ReferenceObjectMismatchError, ImageInspectionError):
             with self._session_factory.begin() as session:
@@ -130,10 +155,26 @@ class ReferenceAssetMaintenance:
             try:
                 self._blob_store.delete(record.object_key)
             except BlobStoreUnavailable:
-                logger.warning(
-                    "invalid staging object cleanup will need storage recovery",
-                    extra={"asset_id": str(record.id), "operation": "delete_invalid_staging"},
+                log_task_event(
+                    logger,
+                    "reference_asset_invalid_object_cleanup_deferred",
+                    level=logging.WARNING,
+                    asset_id=str(record.id),
+                    error_code="OBJECT_STORE_UNAVAILABLE",
+                    maintenance_task=True,
+                    status="retry",
                 )
+            log_task_event(
+                logger,
+                "reference_asset_staging_recovery_failed",
+                level=logging.WARNING,
+                asset_id=str(record.id),
+                error_code="STAGED_OBJECT_INVALID",
+                recovery=True,
+                maintenance_task=True,
+                status="failed",
+                duration_ms=(time.monotonic() - started_at) * 1000,
+            )
             return "failed"
         with self._session_factory.begin() as session:
             ready = self._repository.mark_ready(
@@ -142,6 +183,15 @@ class ReferenceAssetMaintenance:
                 now=self._clock(),
                 lease_token=lease_token,
             )
+        log_task_event(
+            logger,
+            "reference_asset_staging_recovered",
+            asset_id=str(record.id),
+            recovery=True,
+            maintenance_task=True,
+            status="ready" if ready else "unchanged",
+            duration_ms=(time.monotonic() - started_at) * 1000,
+        )
         return "ready" if ready else "skipped"
 
     def _delete_pending(self, record: ReferenceAssetRecord, lease_token: UUID) -> bool:

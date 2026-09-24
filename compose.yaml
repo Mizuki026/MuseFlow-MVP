@@ -121,6 +121,7 @@ services:
   worker:
     build: ./backend
     command: ["uv", "run", "--no-dev", "celery", "-A", "museflow.worker:celery_app", "worker", "--loglevel=INFO", "--concurrency=1", "-Q", "generation"]
+    mem_limit: 1g
     environment:
       MUSEFLOW_DATABASE_URL: postgresql+psycopg://museflow:museflow@postgres:5432/museflow
       REDIS_URL: redis://redis:6379/0

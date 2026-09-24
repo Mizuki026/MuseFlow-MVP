@@ -51,8 +51,13 @@ def session_factory(database_url: str):
 
 
 def test_create_persists_task_event_and_execution_outbox_in_one_transaction(
-    session_factory,
+    session_factory, monkeypatch
 ) -> None:
+    task_events: list[tuple[str, dict[str, object]]] = []
+    monkeypatch.setattr(
+        "museflow.tasks.application.log_task_event",
+        lambda _logger, name, **fields: task_events.append((name, fields)),
+    )
     create = CreateTask(session_factory)
     result = create.execute(CreateTaskRequest(prompt="a mountain lake"), "integration-1")
 
@@ -66,6 +71,12 @@ def test_create_persists_task_event_and_execution_outbox_in_one_transaction(
     assert len(outbox) == 1
     assert outbox[0].message_type == "EXECUTE_TASK"
     assert outbox[0].payload == {"task_id": str(result.task.id)}
+    event_name, task_created = next(item for item in task_events if item[0] == "task_created")
+    assert event_name == "task_created"
+    assert task_created["task_id"] == str(result.task.id)
+    assert task_created["generation_type"] == "TEXT_TO_IMAGE"
+    assert task_created["provider_profile"] == result.task.provider_profile
+    assert "prompt" not in task_created
 
 
 def test_same_key_replays_without_another_event_or_outbox(session_factory) -> None:

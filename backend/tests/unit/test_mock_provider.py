@@ -157,3 +157,15 @@ def test_rate_limit_scenario_fails_before_creating_a_remote_request() -> None:
     assert error.value.code == "PROVIDER_RATE_LIMITED"
     assert provider.create_calls == 0
     assert remote_ids == []
+
+def test_timeout_scenario_is_transient_after_mock_submission() -> None:
+    provider = MockProvider(scenario="timeout")
+    request = GenerationRequest(prompt="timeout recovery", size_preset="1280*1280")
+
+    with pytest.raises(TransientProviderError) as raised:
+        provider.generate(request, request_key="timeout:attempt:1", remote_request_id=None)
+
+    assert raised.value.code == "PROVIDER_TIMEOUT"
+    assert raised.value.retryable is True
+    assert provider.create_calls == 1
+    assert provider.poll_calls == 0

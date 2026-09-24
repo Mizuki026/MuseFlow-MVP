@@ -12,6 +12,7 @@ from museflow.reference_assets.dispatch import (
     ReferenceMaintenanceScheduler,
 )
 from museflow.runtime import runtime_probe
+from museflow.safe_logging import log_task_event
 from museflow.tasks.dispatcher import OutboxDispatcher
 from museflow.tasks.recovery import RecoverExpiredLeases, ScheduleDueRetries
 
@@ -31,8 +32,16 @@ def run_scheduler_iteration(
     try:
         maintenance_scheduler.run_once()
         maintenance_dispatcher.dispatch_once()
-    except Exception:
-        logger.exception("reference asset maintenance dispatch failed")
+    except Exception as error:
+        log_task_event(
+            logger,
+            "reference_asset_maintenance_dispatch_failed",
+            level=logging.ERROR,
+            error_code="MAINTENANCE_DISPATCH_FAILED",
+            error_type=type(error).__name__,
+            maintenance_task=True,
+            status="failed",
+        )
 
 
 def run_scheduler() -> None:

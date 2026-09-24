@@ -165,7 +165,14 @@ def test_expired_worker_token_cannot_commit_after_takeover(isolated_session_fact
     "error_code",
     ["RETRY_EXHAUSTED", "PROVIDER_NOT_CONFIGURED", "PROVIDER_AUTHENTICATION"],
 )
-def test_manual_retry_creates_one_linear_child(isolated_session_factory, error_code: str) -> None:
+def test_manual_retry_creates_one_linear_child(
+    isolated_session_factory, error_code: str, monkeypatch
+) -> None:
+    retry_events: list[tuple[str, dict[str, object]]] = []
+    monkeypatch.setattr(
+        "museflow.tasks.application.log_task_event",
+        lambda _logger, name, **fields: retry_events.append((name, fields)),
+    )
     clock = MutableClock()
     task_id = _create_task(isolated_session_factory, prompt="manual retry", clock=clock)
     try:
@@ -182,6 +189,14 @@ def test_manual_retry_creates_one_linear_child(isolated_session_factory, error_c
             retried_from_task_id=task_id,
         )
         assert child.task.retried_from_task_id == task_id
+        event_name, retry_log = next(
+            item for item in retry_events if item[0] == "manual_retry_created"
+        )
+        assert event_name == "manual_retry_created"
+        assert retry_log["task_id"] == str(child.task.id)
+        assert retry_log["recovery"] is True
+        assert retry_log["status"] == "QUEUED"
+        assert "prompt" not in retry_log
         with pytest.raises(ManualRetryNotAllowedError):
             create.execute(
                 CreateTaskRequest(prompt="manual retry"),

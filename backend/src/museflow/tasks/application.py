@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -23,6 +24,7 @@ from museflow.reference_assets.repository import (
     ReferenceAssetRepository,
     ReferenceAssetStateError,
 )
+from museflow.safe_logging import log_task_event
 from museflow.tasks.domain import (
     CreateTaskRequest,
     DomainErrorCode,
@@ -38,6 +40,8 @@ from museflow.tasks.domain import (
 )
 from museflow.tasks.execution_semantics import LeaseSettings
 from museflow.tasks.repository import EventRecord, TaskRecord, TaskRepository
+
+logger = logging.getLogger(__name__)
 
 
 class IdempotencyConflictError(ValueError):
@@ -175,6 +179,15 @@ class CreateTask:
             if winner is None:
                 raise
             return self._replay_existing(winner, request)
+        log_task_event(
+            logger,
+            "task_created",
+            task_id=str(created.id),
+            generation_type=created.generation_type.value,
+            provider_name=created.provider_name,
+            provider_profile=created.provider_profile,
+            status=created.status.value,
+        )
         return CreateTaskResult(task=created, idempotency_replayed=False)
 
     def retry(self, task_id: UUID, idempotency_key: str) -> CreateTaskResult:
@@ -280,6 +293,16 @@ class CreateTask:
                     "idempotency key was used for a different retry request"
                 ) from error
             return CreateTaskResult(winner, idempotency_replayed=True)
+        log_task_event(
+            logger,
+            "manual_retry_created",
+            task_id=str(created.id),
+            generation_type=created.generation_type.value,
+            provider_name=created.provider_name,
+            provider_profile=created.provider_profile,
+            recovery=True,
+            status=created.status.value,
+        )
         return CreateTaskResult(task=created, idempotency_replayed=False)
 
     def _lock_reference(

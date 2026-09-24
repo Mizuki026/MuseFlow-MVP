@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import tempfile
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
@@ -26,7 +27,10 @@ from museflow.reference_assets.repository import (
     ReferenceAssetRecord,
     ReferenceAssetRepository,
 )
+from museflow.safe_logging import log_task_event
 from museflow.tasks.domain import ReferenceAssetStatus
+
+logger = logging.getLogger(__name__)
 
 
 class ReferenceAssetConflictError(RuntimeError):
@@ -158,6 +162,12 @@ class ReferenceAssetService:
                 "IDEMPOTENCY_KEY_CONFLICT", "Idempotency-Key was used for different image data"
             )
         if record.status is ReferenceAssetStatus.READY:
+            log_task_event(
+                logger,
+                "reference_asset_upload_replayed",
+                asset_id=str(record.id),
+                status="ready",
+            )
             return record, True
         if record.status is not ReferenceAssetStatus.STAGING:
             raise ReferenceAssetConflictError(
@@ -232,7 +242,14 @@ class ReferenceAssetService:
             raise ReferenceAssetUnavailableError(
                 "REFERENCE_ASSET_PROCESSING", "reference asset is still being processed"
             )
-        return current, not is_new or not marked_ready
+        replayed = not is_new or not marked_ready
+        log_task_event(
+            logger,
+            "reference_asset_upload_replayed" if replayed else "reference_asset_uploaded",
+            asset_id=str(current.id),
+            status="ready",
+        )
+        return current, replayed
 
     def get(self, asset_id: UUID) -> ReferenceAssetRecord | None:
         with self._session_factory() as session:

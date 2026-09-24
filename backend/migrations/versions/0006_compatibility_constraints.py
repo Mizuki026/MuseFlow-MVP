@@ -42,9 +42,15 @@ def upgrade() -> None:
         "WHERE policy_snapshot IS NULL"
     )
 
-    op.alter_column("generation_tasks", "generation_type", existing_type=sa.String(32), nullable=False)
-    op.alter_column("generation_tasks", "provider_profile", existing_type=sa.String(128), nullable=False)
-    op.alter_column("generation_tasks", "provider_name", existing_type=sa.String(64), nullable=False)
+    op.alter_column(
+        "generation_tasks", "generation_type", existing_type=sa.String(32), nullable=False
+    )
+    op.alter_column(
+        "generation_tasks", "provider_profile", existing_type=sa.String(128), nullable=False
+    )
+    op.alter_column(
+        "generation_tasks", "provider_name", existing_type=sa.String(64), nullable=False
+    )
     op.alter_column("generation_tasks", "model_name", existing_type=sa.String(128), nullable=False)
     op.alter_column(
         "generation_tasks", "capability_version", existing_type=sa.String(64), nullable=False

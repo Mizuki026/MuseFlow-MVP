@@ -182,7 +182,29 @@ def test_simulated_dashscope_edit_runs_through_real_compose_services(monkeypatch
                 if status in {TaskStatus.SUCCEEDED.value, TaskStatus.FAILED.value}:
                     break
                 time.sleep(0.2)
-        assert status == TaskStatus.SUCCEEDED.value
+        if status != TaskStatus.SUCCEEDED.value:
+            with factory() as session:
+                failed_task = session.get(GenerationTaskModel, task_id)
+                failed_attempts = list(
+                    session.scalars(
+                        select(GenerationAttemptModel)
+                        .where(GenerationAttemptModel.task_id == task_id)
+                        .order_by(GenerationAttemptModel.sequence.desc())
+                    )
+                )
+            latest_attempt = failed_attempts[0] if failed_attempts else None
+            failure_summary = {
+                "status": status,
+                "task_error_code": failed_task.error_code if failed_task is not None else None,
+                "attempt_phase": latest_attempt.phase if latest_attempt is not None else None,
+                "attempt_status": latest_attempt.status if latest_attempt is not None else None,
+                "attempt_error_code": (
+                    latest_attempt.error_code if latest_attempt is not None else None
+                ),
+                "provider_methods": [request.method for request in provider_requests],
+                "result_fetch_count": result_fetch_count,
+            }
+            pytest.fail(f"simulated DashScope task did not succeed: {failure_summary}")
 
         with factory() as session:
             task = session.get(GenerationTaskModel, task_id)

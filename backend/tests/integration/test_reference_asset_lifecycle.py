@@ -169,8 +169,13 @@ def _cleanup(
 
 
 def test_staging_recovery_readies_valid_object_and_fails_missing_or_invalid_objects(
-    store_and_factory,
+    store_and_factory, monkeypatch
 ) -> None:
+    recovery_events: list[tuple[str, dict[str, object]]] = []
+    monkeypatch.setattr(
+        "museflow.reference_assets.maintenance.log_task_event",
+        lambda _logger, name, **fields: recovery_events.append((name, fields)),
+    )
     factory, blob_store = store_and_factory
     now = datetime.now(UTC)
     ready_id = _create_asset(
@@ -214,6 +219,18 @@ def test_staging_recovery_readies_valid_object_and_fails_missing_or_invalid_obje
         assert statuses[missing_id] == ("FAILED", "STAGED_OBJECT_MISSING")
         assert statuses[invalid_id] == ("FAILED", "STAGED_OBJECT_INVALID")
         assert invalid_id not in [UUID(key.split("/")[1]) for key in blob_store.objects]
+        recovery_logs = [
+            item
+            for item in recovery_events
+            if item[0]
+            in {"reference_asset_staging_recovered", "reference_asset_staging_recovery_failed"}
+        ]
+        by_asset = {fields["asset_id"]: (name, fields) for name, fields in recovery_logs}
+        assert by_asset[str(ready_id)][1]["status"] == "ready"
+        assert by_asset[str(missing_id)][1]["error_code"] == "STAGED_OBJECT_MISSING"
+        assert by_asset[str(invalid_id)][1]["error_code"] == "STAGED_OBJECT_INVALID"
+        assert all(fields["maintenance_task"] is True for _, fields in recovery_logs)
+        assert all("prompt" not in fields for _, fields in recovery_logs)
     finally:
         _cleanup(factory, blob_store, [ready_id, missing_id, invalid_id])
 

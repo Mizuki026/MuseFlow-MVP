@@ -10,6 +10,7 @@ from uuid import UUID
 from sqlalchemy import text
 from sqlalchemy.orm import Session, sessionmaker
 
+from museflow.safe_logging import log_task_event
 from museflow.tasks.execution_semantics import LeaseSettings
 
 logger = logging.getLogger(__name__)
@@ -135,17 +136,33 @@ class LeaseGuard:
                         },
                     ).scalar_one_or_none()
             if renewed_until is None:
-                self._set_state(
+                new_state = (
                     LeaseState.DEADLINE_EXCEEDED
                     if self._clock() >= self._deadline_at
                     else LeaseState.OWNERSHIP_LOST
                 )
+                self._set_state(new_state)
+                log_task_event(
+                    logger,
+                    "execution_ownership_lost",
+                    level=logging.WARNING,
+                    task_id=str(self._task_id),
+                    attempt_id=str(self._attempt_id),
+                    error_code=new_state.value,
+                    status=new_state.value.lower(),
+                )
                 self._stop.set()
             return self.state
-        except Exception:
-            logger.exception(
-                "lease heartbeat failed closed",
-                extra={"task_id": str(self._task_id), "attempt_id": str(self._attempt_id)},
+        except Exception as error:
+            log_task_event(
+                logger,
+                "lease_heartbeat_failed",
+                level=logging.ERROR,
+                task_id=str(self._task_id),
+                attempt_id=str(self._attempt_id),
+                error_code="LEASE_HEARTBEAT_FAILED",
+                error_type=type(error).__name__,
+                status="ownership_lost",
             )
             self._set_state(LeaseState.OWNERSHIP_LOST)
             self._stop.set()

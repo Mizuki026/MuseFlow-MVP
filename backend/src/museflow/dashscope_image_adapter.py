@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import logging
 import os
 import time
 from collections.abc import Callable
@@ -31,7 +32,10 @@ from museflow.safe_artifacts import (
     SafeArtifactFetcher,
     SafeArtifactPolicy,
 )
+from museflow.safe_logging import log_task_event
 from museflow.tasks.execution_semantics import AttemptPhase
+
+logger = logging.getLogger(__name__)
 
 DASHSCOPE_IMAGE_MODEL = "wan2.6-image"
 DASHSCOPE_IMAGE_PROFILE = "dashscope-wan2.6-image-cn-beijing-edit"
@@ -142,6 +146,7 @@ class DashScopeWan26ImageAdapter:
                 on_phase(AttemptPhase.PROVIDER_SUBMITTING)
             self._require_lease(lease_guard)
             body = self.build_request_body(request.input)
+            submission_started = self._monotonic()
             payload, _ = self._send(
                 "POST",
                 DASHSCOPE_IMAGE_CREATE_PATH,
@@ -151,6 +156,17 @@ class DashScopeWan26ImageAdapter:
                 submission=True,
             )
             task_id = self._task_id(payload)
+            log_task_event(
+                logger,
+                "provider_submission_accepted",
+                generation_type="IMAGE_TO_IMAGE",
+                provider_name=self.name,
+                provider_profile=DASHSCOPE_IMAGE_PROFILE,
+                phase=AttemptPhase.PROVIDER_SUBMITTING.value,
+                duration_ms=(self._monotonic() - submission_started) * 1000,
+                remote_request_id=task_id,
+                status="accepted",
+            )
             self._require_lease(lease_guard)
             if on_remote_request_id is not None:
                 try:
@@ -172,6 +188,7 @@ class DashScopeWan26ImageAdapter:
             on_phase=on_phase,
         )
         self._require_lease(lease_guard)
+        fetch_started = self._monotonic()
         try:
             artifact = self._fetcher.fetch(
                 result_url,
@@ -181,10 +198,34 @@ class DashScopeWan26ImageAdapter:
                 ownership_check=lambda: self._require_lease(lease_guard),
             )
         except SafeArtifactError as error:
+            log_task_event(
+                logger,
+                "provider_result_fetch_rejected",
+                level=logging.WARNING,
+                generation_type="IMAGE_TO_IMAGE",
+                provider_name=self.name,
+                provider_profile=DASHSCOPE_IMAGE_PROFILE,
+                phase=AttemptPhase.RESULT_FETCHING.value,
+                error_code=error.code,
+                error_type=type(error).__name__,
+                remote_request_id=task_id,
+                status="rejected",
+            )
             if lease_guard is not None:
                 lease_guard.require_ownership()
             error_type = TransientProviderError if error.retryable else PermanentProviderError
             raise error_type(error.code, str(error)) from None
+        log_task_event(
+            logger,
+            "provider_result_fetched",
+            generation_type="IMAGE_TO_IMAGE",
+            provider_name=self.name,
+            provider_profile=DASHSCOPE_IMAGE_PROFILE,
+            phase=AttemptPhase.RESULT_FETCHING.value,
+            duration_ms=(self._monotonic() - fetch_started) * 1000,
+            remote_request_id=task_id,
+            status="fetched",
+        )
         self._require_lease(lease_guard)
         return GenerationResult(
             provider_name=self.name,
@@ -266,6 +307,7 @@ class DashScopeWan26ImageAdapter:
         for poll_number in range(self._max_polls):
             self._require_lease(lease_guard)
             self._check_deadline(deadline)
+            request_started = self._monotonic()
             payload, status_code = self._send(
                 "GET", path, deadline=deadline, lease_guard=lease_guard, submission=False
             )
@@ -283,6 +325,17 @@ class DashScopeWan26ImageAdapter:
                 )
             if not statuses or statuses[-1] != status:
                 statuses.append(status)
+            log_task_event(
+                logger,
+                "provider_poll_completed",
+                generation_type="IMAGE_TO_IMAGE",
+                provider_name=self.name,
+                provider_profile=DASHSCOPE_IMAGE_PROFILE,
+                phase=AttemptPhase.PROVIDER_RUNNING.value,
+                duration_ms=(self._monotonic() - request_started) * 1000,
+                remote_request_id=task_id,
+                status=status.lower(),
+            )
             if status in {"PENDING", "RUNNING"}:
                 if poll_number + 1 >= self._max_polls:
                     raise TransientProviderError(

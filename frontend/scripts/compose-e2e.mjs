@@ -5,14 +5,20 @@ import { dirname, resolve } from 'node:path'
 
 const frontendDir = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const repoDir = resolve(frontendDir, '..')
-const projectName = `museflow-stage7-e2e-${process.pid}`
-const runId = `stage7-${process.pid}-${Date.now().toString(36)}`
+const projectName = `museflow-compose-e2e-${process.pid}`
+const runId = `compose-e2e-${process.pid}-${Date.now().toString(36)}`
 const allocatedPorts = new Set()
 const playwrightArguments = process.argv.slice(2).filter((argument) => (
-  argument !== '--skip-restart' && argument !== '--backend-check'
+  argument !== '--skip-restart'
+  && argument !== '--backend-check'
+  && argument !== '--full-backend-gates'
 ))
 const skipRestartCheck = process.argv.includes('--skip-restart')
 const runBackendCheck = process.argv.includes('--backend-check')
+const runFullBackendGates = process.argv.includes('--full-backend-gates')
+if (runFullBackendGates && !runBackendCheck) {
+  throw new Error('--full-backend-gates requires --backend-check.')
+}
 
 async function freePort() {
   const server = createServer()
@@ -54,6 +60,10 @@ const env = {
   MUSEFLOW_PROVIDER: 'mock',
   DASHSCOPE_API_KEY: '',
   DASHSCOPE_API_HOST: '',
+  ...(runFullBackendGates ? {
+    MUSEFLOW_LEASE_SECONDS: '3',
+    MUSEFLOW_HEARTBEAT_INTERVAL_SECONDS: '0.5',
+  } : {}),
   MINIO_PUBLIC_ENDPOINT: `http://127.0.0.1:${ports.MUSEFLOW_MINIO_PORT}`,
   PLAYWRIGHT_BASE_URL: `http://127.0.0.1:${ports.MUSEFLOW_WEB_PORT}`,
   MUSEFLOW_E2E_RUN_ID: runId,
@@ -119,10 +129,88 @@ try {
       })
     }
     if (failureCode === 0) {
+      failureCode = await run(uv, ['run', '--directory', 'backend', 'alembic', 'current'], {
+        cwd: repoDir,
+        env: backendEnv,
+      })
+    }
+    if (failureCode === 0) {
       failureCode = await run(uv, ['run', '--directory', 'backend', 'pytest', '-q', '-rs'], {
         cwd: repoDir,
         env: backendEnv,
       })
+    }
+    if (failureCode === 0 && runFullBackendGates) {
+      const serviceDatabaseURL = `postgresql+psycopg://museflow:museflow@127.0.0.1:${ports.MUSEFLOW_POSTGRES_PORT}/museflow`
+      const gateEnv = {
+        ...env,
+        MUSEFLOW_DATABASE_URL: serviceDatabaseURL,
+        MUSEFLOW_TEST_DATABASE_URL: serviceDatabaseURL,
+        MUSEFLOW_PROVIDER: 'mock',
+        DASHSCOPE_API_KEY: '',
+        DASHSCOPE_API_HOST: '',
+        REDIS_URL: `redis://127.0.0.1:${ports.MUSEFLOW_REDIS_PORT}/0`,
+        MINIO_ENDPOINT: `http://127.0.0.1:${ports.MUSEFLOW_MINIO_PORT}`,
+        MINIO_PUBLIC_ENDPOINT: `http://127.0.0.1:${ports.MUSEFLOW_MINIO_PORT}`,
+        MINIO_ACCESS_KEY: 'minioadmin',
+        MINIO_SECRET_KEY: 'minioadmin',
+        MINIO_BUCKET: 'museflow-results',
+        MUSEFLOW_LEASE_SECONDS: '3',
+        MUSEFLOW_HEARTBEAT_INTERVAL_SECONDS: '0.5',
+      }
+      const gateFlags = [
+        'MUSEFLOW_RUN_REAL_IMAGE_TO_IMAGE_TEST',
+        'MUSEFLOW_RUN_REAL_COMPOSE_E2E_TEST',
+        'MUSEFLOW_RUN_SIMULATED_DASHSCOPE_E2E',
+        'MUSEFLOW_RUN_REAL_MINIO_TEST',
+        'MUSEFLOW_RUN_REAL_REDIS_TEST',
+        'MUSEFLOW_RUN_REAL_MAINTENANCE_TEST',
+        'MUSEFLOW_RUN_REFERENCE_MINIO_TEST',
+        'MUSEFLOW_RUN_RESULT_PUBLICATION_INTEGRATION',
+      ]
+      for (const flag of gateFlags) gateEnv[flag] = '0'
+      for (const flag of [
+        'MUSEFLOW_RUN_REAL_IMAGE_TO_IMAGE_TEST',
+        'MUSEFLOW_RUN_REAL_COMPOSE_E2E_TEST',
+        'MUSEFLOW_RUN_REAL_MINIO_TEST',
+        'MUSEFLOW_RUN_REAL_REDIS_TEST',
+        'MUSEFLOW_RUN_REAL_MAINTENANCE_TEST',
+        'MUSEFLOW_RUN_REFERENCE_MINIO_TEST',
+      ]) gateEnv[flag] = '1'
+
+      const uv = process.platform === 'win32' ? 'uv.exe' : 'uv'
+      console.log('Running Compose-worker, Redis, MinIO, and maintenance integration tests.')
+      failureCode = await run(uv, [
+        'run', '--directory', 'backend', 'pytest', '-q', '-rs',
+        'tests/integration/test_real_compose_image_to_image_e2e.py',
+        'tests/integration/test_real_compose_mock_e2e.py',
+        'tests/integration/test_real_minio_smoke.py',
+        'tests/integration/test_real_redis_worker.py',
+        'tests/integration/test_real_reference_maintenance_worker.py',
+        'tests/integration/test_reference_asset_minio.py',
+      ], { cwd: repoDir, env: gateEnv })
+
+      if (failureCode === 0) {
+        console.log('Stopping only the generation worker so test-owned workers have exclusive queue access.')
+        failureCode = await run(docker, [...composePrefix, 'stop', 'worker'], { cwd: repoDir, env })
+      }
+      if (failureCode === 0) {
+        gateEnv.MUSEFLOW_RUN_SIMULATED_DASHSCOPE_E2E = '1'
+        console.log('Running the simulated DashScope integration test in its own worker process.')
+        failureCode = await run(uv, [
+          'run', '--directory', 'backend', 'pytest', '-q', '-rs',
+          'tests/integration/test_real_compose_simulated_dashscope_e2e.py',
+        ], { cwd: repoDir, env: gateEnv })
+      }
+      if (failureCode === 0) {
+        gateEnv.MUSEFLOW_RUN_SIMULATED_DASHSCOPE_E2E = '0'
+        gateEnv.MUSEFLOW_RUN_RESULT_PUBLICATION_INTEGRATION = '1'
+        console.log('Running result-publication integration tests in their own worker process.')
+        failureCode = await run(uv, [
+          'run', '--directory', 'backend', 'pytest', '-q', '-rs',
+          'tests/integration/test_result_publication.py',
+        ], { cwd: repoDir, env: gateEnv })
+      }
     }
   }
   if (failureCode === 0 && !skipRestartCheck) {

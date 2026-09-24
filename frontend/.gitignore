@@ -11,6 +11,11 @@ node_modules
 dist
 dist-ssr
 *.local
+test-results/
+playwright-report/
+blob-report/
+*.trace.zip
+*.webm
 
 # Editor directories and files
 .vscode/*

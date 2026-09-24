@@ -1,0 +1,82 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.2.0
+        with:
+          version: latest-known
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+
+      - name: Install backend dependencies
+        run: uv sync --directory backend --locked --all-groups
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Install Chromium and system dependencies
+        working-directory: frontend
+        run: npx playwright install --with-deps chromium
+
+      - name: Check generated OpenAPI client
+        working-directory: frontend
+        run: npm run check:api-generated
+
+      - name: Check backend lint
+        run: uv run --directory backend ruff check .
+
+      - name: Check backend types
+        run: uv run --directory backend pyright
+
+      - name: Compile backend
+        run: uv run --directory backend python -m compileall -q src tests migrations
+
+      - name: Check frontend types
+        working-directory: frontend
+        run: npm run typecheck
+
+      - name: Check frontend lint
+        working-directory: frontend
+        run: npm run lint
+
+      - name: Run frontend unit tests
+        working-directory: frontend
+        run: npm test
+
+      - name: Build frontend
+        working-directory: frontend
+        run: npm run build
+
+      - name: Validate Compose configuration
+        run: docker compose config --quiet
+
+      - name: Run isolated full-stack and backend integration checks
+        working-directory: frontend
+        run: npm run test:e2e:compose -- --backend-check --full-backend-gates
