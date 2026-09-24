@@ -37,9 +37,7 @@ class GenerationTaskModel(Base):
         Index("ix_generation_tasks_history", "created_at", "id"),
         Index("ix_generation_tasks_status_history", "status", "created_at", "id"),
         CheckConstraint(
-            "generation_type IN ("
-            + ", ".join(f"'{item.value}'" for item in GenerationType)
-            + ")",
+            "generation_type IN (" + ", ".join(f"'{item.value}'" for item in GenerationType) + ")",
             name="ck_generation_task_type",
         ),
         CheckConstraint(
@@ -126,15 +124,24 @@ class ReferenceAssetModel(Base):
     __tablename__ = "reference_assets"
     __table_args__ = (
         CheckConstraint(
-            "status IN ("
-            + ", ".join(f"'{item.value}'" for item in ReferenceAssetStatus)
-            + ")",
+            "status IN (" + ", ".join(f"'{item.value}'" for item in ReferenceAssetStatus) + ")",
             name="ck_reference_asset_status",
         ),
         UniqueConstraint("idempotency_key", name="uq_reference_assets_idempotency_key"),
         UniqueConstraint("object_key", name="uq_reference_assets_object_key"),
         Index("ix_reference_assets_status_created", "status", "created_at"),
         Index("ix_reference_assets_status_delete_pending", "status", "delete_pending_at"),
+        Index(
+            "ix_reference_assets_operation_claim",
+            "status",
+            "operation_lease_expires_at",
+            "created_at",
+        ),
+        CheckConstraint(
+            "(operation_lease_token IS NULL AND operation_lease_expires_at IS NULL) OR "
+            "(operation_lease_token IS NOT NULL AND operation_lease_expires_at IS NOT NULL)",
+            name="ck_reference_asset_operation_lease_pair",
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), primary_key=True, default=uuid4)
@@ -153,6 +160,8 @@ class ReferenceAssetModel(Base):
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     error_code: Mapped[str | None] = mapped_column(String(64))
     error_message: Mapped[str | None] = mapped_column(Text)
+    operation_lease_token: Mapped[UUID | None] = mapped_column(PostgreSQLUUID(as_uuid=True))
+    operation_lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class TaskEventModel(Base):
@@ -172,9 +181,7 @@ class TaskEventModel(Base):
 
 class OutboxMessageModel(Base):
     __tablename__ = "outbox_messages"
-    __table_args__ = (
-        Index("ix_outbox_available", "published_at", "available_at", "created_at"),
-    )
+    __table_args__ = (Index("ix_outbox_available", "published_at", "available_at", "created_at"),)
 
     id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), primary_key=True, default=uuid4)
     message_type: Mapped[str] = mapped_column(String(64), nullable=False)

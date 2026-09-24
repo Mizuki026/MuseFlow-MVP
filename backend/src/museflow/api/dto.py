@@ -6,7 +6,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict
 
 from museflow.providers import MockScenario
-from museflow.tasks.domain import GenerationType, TaskStatus
+from museflow.tasks.domain import GenerationType, ReferenceAssetStatus, TaskStatus
 from museflow.tasks.execution_models import GenerationAttemptModel
 from museflow.tasks.repository import EventRecord, TaskRecord
 
@@ -32,6 +32,18 @@ class ApiErrorDetail(BaseModel):
 
 class ErrorResponse(BaseModel):
     error: ApiErrorDetail
+
+
+class ReferenceAssetResponse(BaseModel):
+    asset_id: UUID
+    status: ReferenceAssetStatus
+    content_type: str | None
+    width: int | None
+    height: int | None
+    size_bytes: int | None
+    sha256: str | None
+    download_url: str
+    idempotency_replayed: bool = False
 
 
 class TaskEventResponse(BaseModel):

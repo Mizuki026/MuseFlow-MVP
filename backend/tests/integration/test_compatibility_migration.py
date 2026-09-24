@@ -184,7 +184,7 @@ def test_empty_database_upgrades_to_head_repeatedly_without_runtime_services(
     command.check(config)
     with engine.connect() as connection:
         revision = connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-        assert revision == "0006_compatibility_constraints"
+        assert revision == "0007_reference_operation_leases"
         assert connection.execute(text("SELECT count(*) FROM reference_assets")).scalar_one() == 0
 
     command.upgrade(config, "head")

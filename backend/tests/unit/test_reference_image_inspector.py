@@ -167,6 +167,10 @@ def test_rejects_byte_and_pixel_limits_and_accepts_max_pixel_boundary(
     metadata = _inspect(tmp_path, boundary)
     assert metadata.width * metadata.height == MAX_REFERENCE_PIXELS
 
+    byte_boundary = content + b"0" * (MAX_REFERENCE_BYTES - len(content))
+    metadata = _inspect(tmp_path, byte_boundary)
+    assert metadata.size_bytes == MAX_REFERENCE_BYTES
+
 
 def test_filename_extension_is_not_used_to_detect_image_format(tmp_path: Path) -> None:
     path = tmp_path / "actually-jpeg.png"
