@@ -806,13 +806,14 @@ Playwright 使用 `MockProvider` 覆盖：
 
 - 修改前直接相关基线：`uv run pytest -q tests/unit/test_dashscope_provider.py tests/unit/test_task_domain.py tests/integration/test_async_pipeline.py tests/integration/test_retry_recovery.py tests/integration/test_result_publication.py`，结果 `31 passed, 2 warnings`。使用独立 PostgreSQL 测试数据库，不连接默认 `museflow` 数据库。
 - 阶段 2 聚焦回归：`uv run pytest -q tests/unit/test_execution_semantics.py tests/unit/test_dashscope_provider.py tests/unit/test_task_domain.py tests/integration/test_lease_execution.py tests/integration/test_retry_recovery.py tests/integration/test_result_publication.py`，结果 `65 passed, 2 warnings`。
-- 完整后端：设置隔离 `MUSEFLOW_TEST_DATABASE_URL`、`MUSEFLOW_DATABASE_URL`，启用 `MUSEFLOW_RUN_RESULT_PUBLICATION_INTEGRATION=1`、`MUSEFLOW_RUN_REAL_MINIO_TEST=1` 和本地 MinIO 配置后运行 `uv run pytest -q`，结果 `110 passed, 2 skipped, 2 warnings`。两个 gated 测试（真实 Redis Worker 与完整 Compose E2E）在此全量命令中跳过；真实 Redis Worker 测试另行实际运行并通过。两条弃用警告来自现有 Starlette/httpx 与 AnyIO 测试栈。
+- LeaseGuard 独立单元测试：`uv run pytest -q tests/unit/test_lease_guard.py`，结果 `3 passed`，覆盖 deadline 到期、条件续租未命中和数据库异常的 fail-closed 行为。
+- 完整后端：设置隔离 `MUSEFLOW_TEST_DATABASE_URL`、`MUSEFLOW_DATABASE_URL`，启用 `MUSEFLOW_RUN_RESULT_PUBLICATION_INTEGRATION=1`、`MUSEFLOW_RUN_REAL_MINIO_TEST=1` 和本地 MinIO 配置后运行 `uv run pytest -q`，结果 `113 passed, 2 skipped, 2 warnings`。两个 gated 测试（真实 Redis Worker 与完整 Compose E2E）在此全量命令中跳过；真实 Redis Worker 测试另行实际运行并通过。两条弃用警告来自现有 Starlette/httpx 与 AnyIO 测试栈。
 - 真实 Redis/Scheduler/Worker：启动独立 host Worker 和 Scheduler，设 `MUSEFLOW_RUN_REAL_REDIS_TEST=1`、lease `1.2` 秒、heartbeat `0.2` 秒，运行 `uv run pytest -q tests/integration/test_real_redis_worker.py`，结果 `1 passed`。任务执行超过原 lease，最终单 attempt 完成且无错误 lease reclaim。
 - PostgreSQL/Alembic：空测试库执行 `uv run alembic upgrade head`，全部现有 `0001` 至 `0004` revisions 成功；`uv run alembic check` 返回 `No new upgrade operations detected`。本阶段没有新增 schema，因此无需含历史业务行的数据迁移。
 - 完整代码校验：`uv run ruff check src tests` 通过；`uv run pyright` 返回 `0 errors, 0 warnings, 0 informations`；`uv run python -m compileall -q src tests` 通过。
 - 部署与差异检查：`docker compose config --quiet` 通过；从仓库根目录执行 `git diff --check` 通过（仅有 Git 的 LF/CRLF 提示）。
-- 全量测试首次运行时误将正在运行的本地 Scheduler/Worker 与测试套件共用同一隔离数据库，造成测试间任务竞争；停止两项进程、修正旧测试对新 phase 事件的断言后重新运行，得到以上全绿结果。最终全量运行时 Redis Worker/Scheduler 已停止。
-- 阶段 2 实现提交：`490427b`（`feat: 增加执行租约续租与恢复语义`）。文档提交 SHA 与最终工作区状态在交付报告中记录。
+- 验证期间发现测试库同时被临时 Scheduler/Worker 使用，以及 phase 事件与成功事件同时间戳时排序不稳定；停止两项进程并将断言改为验证事件集合后，全量运行通过。最终全量运行时 Redis Worker/Scheduler 已停止。
+- 阶段 2 实现提交：`490427b`（`feat: 增加执行租约续租与恢复语义`）；LeaseGuard 单元测试补充提交：`1c45d1f`（`test: 补充 LeaseGuard 单元覆盖`）。
 
 ## 22. 参考资料
 
