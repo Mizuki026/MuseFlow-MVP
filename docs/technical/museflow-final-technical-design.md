@@ -1,7 +1,7 @@
 # MuseFlow 最终版本技术方案
 
 - 版本：v0.2
-- 状态：待实施
+- 状态：分阶段实施中（阶段 2 完成）
 - 更新日期：2026-09-24
 - 对应产品文档：[MuseFlow 最终产品设计文档](../product/museflow-product-design.md)
 - 基线方案：[MuseFlow MVP 技术方案](./museflow-mvp-technical-design.md)
@@ -407,13 +407,16 @@ INPUT_LOADING
 
 ### 10.3 LeaseGuard
 
-Worker 领取 attempt 后启动 `LeaseGuard`：
+Worker 领取 attempt 后启动 `LeaseGuard`。它在前台 I/O 检查点和后台 heartbeat 线程中共享 ownership/deadline 状态；Provider、对象存储和数据库事务之间不持有长事务或行锁。
 
-- heartbeat 使用独立 session 和短事务，仅在 execution token 仍匹配时延长 lease；
-- heartbeat 间隔、lease 时长和各阶段超时在启动时验证，不能形成 lease 早于合法阶段截止的组合；
-- Adapter 在提交前、轮询间隔和结果下载前检查 ownership；
-- 失去 ownership 后不再推进数据库权威状态，也不覆盖任何对象；
-- 进程崩溃时 heartbeat 自然停止，由 Scheduler 在 lease 到期后接管。
+- `MUSEFLOW_LEASE_SECONDS` 默认 240 秒；`MUSEFLOW_HEARTBEAT_INTERVAL_SECONDS` 默认 30 秒。启动时要求二者为正数，heartbeat 周期不得超过 lease 时长的三分之一。Worker 使用同一份 `LeaseSettings`。
+- heartbeat 使用独立 SQLAlchemy session 和短事务。单条 PostgreSQL 更新先以 no-op task 行更新串行化 Scheduler 接管，再按 task 为 `RUNNING`、deadline 未到、attempt 为 `RUNNING`、execution token 匹配且现有 lease 尚未过期更新 lease。受影响行数为零或数据库操作失败即 fail closed。
+- 新 lease 为 `LEAST(GREATEST(现有 lease, now + lease 时长), task deadline)`，因此只能向前延长且不会越过任务 deadline。heartbeat 的 statement timeout 为 5 秒，数据库连接/池等待也有上限。
+- 输入加载、Provider 创建前后、轮询、结果获取、候选写入和权威发布周围检查 ownership/deadline。创建响应拿到 remote ID 后立即以 token 条件保存；保存失败时不再创建第二个 Provider 请求。
+- ownership 丢失后 Worker 停止轮询、下载、候选写入和数据库发布；已发出的 HTTP 请求无法撤回，等待其返回后仍会通过 guard 阻止后续权威操作。deadline 到达时停止 heartbeat，并将仍有效的任务/attempt 置为 `DEADLINE_EXCEEDED`。
+- `LeaseGuard.stop()` 设置停止信号并 join heartbeat 线程；异常退出与正常完成都会走同一清理路径。进程崩溃时线程随进程停止，Scheduler 再按 lease 回收。
+
+phase 持久化复用已有 `generation_attempts.phase` 文本列，无需迁移。只允许稳定阶段向前单步转换和相同阶段重放；每个实际转换产生 `ATTEMPT_PHASE_CHANGED` 事件。`COMPLETED` 不可回退。旧有 `PROVIDER_RUNNING` 且无 remote ID 被视为提交结果未知，不能重发。
 
 Provider 调用和对象存储 I/O 期间不得持有数据库行锁或长事务。
 
@@ -441,8 +444,14 @@ Provider 调用和对象存储 I/O 期间不得持有数据库行锁或长事务
 | `PROVIDER_PROFILE_UNAVAILABLE` | 部署配置 | 创建时 503；执行时停止自动重试 | 否 | 修复配置后允许 |
 | `PROVIDER_CONTENT_REJECTED` | Provider 永久错误 | 任务失败 | 否 | 不允许原输入 |
 | `PROVIDER_UNAVAILABLE` | Provider 临时错误 | 需要重新提交时按策略退避 | 是 | 自动耗尽或 deadline 后允许 |
+| `PROVIDER_SUBMISSION_UNKNOWN` | Provider 创建状态未知 | 终止自动执行并记录可能已产生外部调用/费用 | 否 | 不允许自动或手动重发原输入 |
+| `OWNERSHIP_LOST` | 执行租约 | 旧 Worker 停止，不改写权威状态 | 否 | 由当前 token 的 Worker 接管 |
+| `DEADLINE_EXCEEDED` | 任务 deadline | 终止任务与运行 attempt | 否 | 按现有手动重试规则处理 |
+| Provider 运行/结果获取临时错误且已有 remote ID | Provider/结果获取 | 保留 phase 和 remote ID，回收后同 attempt 恢复 | 否 | 截止时间后允许 |
 | `RESULT_INVALID` | Provider/安全边界 | 任务失败 | 否 | 默认不允许 |
 | `RESULT_STORAGE_ERROR` | 基础设施 | 原 attempt 恢复 | 否 | 截止时间后允许 |
+
+只有策略允许重新执行一次 Provider 创建、没有可恢复 remote ID、未超过最大 attempt 且下次执行仍早于任务 deadline 时，才创建新 attempt 并分配新 execution token。轮询、结果重新获取、候选重写和数据库发布重试都复用同一 attempt。
 
 `can_retry` 由稳定错误码和任务状态的纯函数计算，前端不自行推断。未知异常不得默认伪装成 Provider 故障；必须先按发生阶段归入平台、存储或 Provider 责任域。
 
@@ -665,6 +674,16 @@ Playwright 使用 `MockProvider` 覆盖：
 
 验收：跨越原 lease 的执行保持 ownership；token 失效后停止权威提交；已有远端请求恢复不重复创建。
 
+阶段 2 实施记录：
+
+- 新增纯策略 `execution_semantics.py` 和窄 `LeaseGuard`。phase 转换、责任域、失败动作、attempt/deadline 资格、提交未知判定和 lease 配置校验集中定义。
+- heartbeat 以 task 行短暂串行化 Scheduler，执行 token、RUNNING 状态、deadline 和未过期 lease 都参与单条条件更新；更新行数为零、数据库错误或 deadline 到期均停止本地执行。lease 默认 240 秒、heartbeat 默认 30 秒且不得超过 lease 的三分之一。
+- Provider 当前 phase 和 remote request ID 通过 execution token 条件写入。已保存 remote ID 的轮询、结果获取、结果持久化和权威发布恢复复用同一 attempt；只有明确允许重新创建 Provider 请求时才新建 attempt。
+- DashScope 创建 POST 的网络/响应状态不明、畸形响应或缺少 task ID 均终止为 `PROVIDER_SUBMISSION_UNKNOWN` 并记录 `possible_external_call`；不会经 Worker、Scheduler 或 Celery 自动再发 POST。明确的 429 拒绝仍按原有线性重试策略处理。
+- 不增加 migration：阶段复用既有 phase 文本列，legacy `PROVIDER_RUNNING`/无 ID 路径已覆盖；从空 PostgreSQL 执行全部现有 Alembic revisions 成功，`alembic check` 无新操作。
+- 真实 Redis/Worker/Scheduler 长任务测试在 lease 1.2 秒、heartbeat 0.2 秒时成功跨过原 lease：单 attempt、无 `ATTEMPT_RECLAIMED`、最终 `COMPLETED`。PostgreSQL 集成覆盖 token 失效、deadline、数据库 heartbeat 故障、接管与恢复；MinIO 回归覆盖旧/新 Worker 交错和发布事务故障恢复。
+- 验证结果与对应提交记录见第 21 节。
+
 ### 阶段 3：兼容数据迁移
 
 - 新建 `reference_assets`，扩展 `result_assets` 与 `generation_tasks`。
@@ -761,8 +780,9 @@ Playwright 使用 `MockProvider` 覆盖：
 - 真实文生图 Provider、`MockProvider`、安全结果下载和私有 MinIO。
 - 创建、详情、历史三个正式前端页面及 OpenAPI 类型生成。
 - MVP 单元、集成、故障恢复和端到端测试。
+- 阶段 2：执行 lease heartbeat、稳定 attempt phase、ownership/deadline fail-closed 和同 attempt 恢复语义。
 
-阶段 0 已完成并得出 `CONDITIONAL GO`；阶段 1 的不可变候选和数据库权威结果 fencing 已完成。下一步进入阶段 2，单独实施 Lease heartbeat、稳定执行阶段和错误责任域。阶段 2 完成后再进入兼容数据迁移、参考素材和 Provider Adapter。正式接入真实结果下载前必须先实现满足阶段 0 报告安全条件的 `SafeArtifactFetcher`，不得在 P0 可靠性缺口修复前扩展图生图任务。
+阶段 0 已完成并得出 `CONDITIONAL GO`；阶段 1 的不可变候选和数据库权威结果 fencing 已完成；阶段 2 的 heartbeat、稳定 phase、失败责任域和恢复边界已实现并通过验证。下一步可以进入阶段 3 兼容数据迁移。阶段 3/4 不应等待正式 Provider 接入；正式接入真实结果下载前仍必须实现符合阶段 0 报告要求的 `SafeArtifactFetcher`，不得绕过 DNS 连接保护和完整图片解码条件。
 
 产品与架构决策已经在 2026-09-24 的审查中收敛。每次真实图生图请求仍需要单独确认账号、地域、费用、请求参数和单次授权；文档结论本身不构成付费调用授权。
 
@@ -780,7 +800,19 @@ Playwright 使用 `MockProvider` 覆盖：
 - `docker compose config --quiet`：通过；`git diff --check`：通过。
 - 实现提交：`e469a21dd624d3f774236fc326634be82db40105`（`fix: 使用不可变候选保护权威结果`）。文档同步提交 SHA 与最终工作区状态由交付报告记录。
 
-正式 Provider Adapter 仍受阶段 0 `SafeArtifactFetcher` 部署前置条件约束；本窗口未实现该 fetcher、lease heartbeat、参考素材或图生图 schema。
+正式 Provider Adapter 仍受阶段 0 `SafeArtifactFetcher` 部署前置条件约束；阶段 1 窗口未实现该 fetcher、lease heartbeat、参考素材或图生图 schema。阶段 2 已完成 heartbeat 与执行语义，参考素材和图生图 schema 仍留给后续阶段。
+
+### 阶段 2 验证记录
+
+- 修改前直接相关基线：`uv run pytest -q tests/unit/test_dashscope_provider.py tests/unit/test_task_domain.py tests/integration/test_async_pipeline.py tests/integration/test_retry_recovery.py tests/integration/test_result_publication.py`，结果 `31 passed, 2 warnings`。使用独立 PostgreSQL 测试数据库，不连接默认 `museflow` 数据库。
+- 阶段 2 聚焦回归：`uv run pytest -q tests/unit/test_execution_semantics.py tests/unit/test_dashscope_provider.py tests/unit/test_task_domain.py tests/integration/test_lease_execution.py tests/integration/test_retry_recovery.py tests/integration/test_result_publication.py`，结果 `65 passed, 2 warnings`。
+- 完整后端：设置隔离 `MUSEFLOW_TEST_DATABASE_URL`、`MUSEFLOW_DATABASE_URL`，启用 `MUSEFLOW_RUN_RESULT_PUBLICATION_INTEGRATION=1`、`MUSEFLOW_RUN_REAL_MINIO_TEST=1` 和本地 MinIO 配置后运行 `uv run pytest -q`，结果 `110 passed, 2 skipped, 2 warnings`。两个 gated 测试（真实 Redis Worker 与完整 Compose E2E）在此全量命令中跳过；真实 Redis Worker 测试另行实际运行并通过。两条弃用警告来自现有 Starlette/httpx 与 AnyIO 测试栈。
+- 真实 Redis/Scheduler/Worker：启动独立 host Worker 和 Scheduler，设 `MUSEFLOW_RUN_REAL_REDIS_TEST=1`、lease `1.2` 秒、heartbeat `0.2` 秒，运行 `uv run pytest -q tests/integration/test_real_redis_worker.py`，结果 `1 passed`。任务执行超过原 lease，最终单 attempt 完成且无错误 lease reclaim。
+- PostgreSQL/Alembic：空测试库执行 `uv run alembic upgrade head`，全部现有 `0001` 至 `0004` revisions 成功；`uv run alembic check` 返回 `No new upgrade operations detected`。本阶段没有新增 schema，因此无需含历史业务行的数据迁移。
+- 完整代码校验：`uv run ruff check src tests` 通过；`uv run pyright` 返回 `0 errors, 0 warnings, 0 informations`；`uv run python -m compileall -q src tests` 通过。
+- 部署与差异检查：`docker compose config --quiet` 通过；从仓库根目录执行 `git diff --check` 通过（仅有 Git 的 LF/CRLF 提示）。
+- 全量测试首次运行时误将正在运行的本地 Scheduler/Worker 与测试套件共用同一隔离数据库，造成测试间任务竞争；停止两项进程、修正旧测试对新 phase 事件的断言后重新运行，得到以上全绿结果。最终全量运行时 Redis Worker/Scheduler 已停止。
+- 阶段 2 实现提交：`490427b`（`feat: 增加执行租约续租与恢复语义`）。文档提交 SHA 与最终工作区状态在交付报告中记录。
 
 ## 22. 参考资料
 
