@@ -18,6 +18,8 @@ def test_normalize_create_request_preserves_prompt_and_applies_generation_defaul
         ("PROVIDER_AUTHENTICATION", True),
         ("RESULT_STORAGE_ERROR", True),
         ("RESULT_INVALID", False),
+        ("PROVIDER_SUBMISSION_UNKNOWN", False),
+        ("OWNERSHIP_LOST", False),
     ],
 )
 def test_manual_retry_policy_matches_documented_error_contract(

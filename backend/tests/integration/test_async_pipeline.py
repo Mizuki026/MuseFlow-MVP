@@ -125,7 +125,11 @@ def test_worker_success_and_duplicate_delivery_have_one_authoritative_attempt(
                 )
             )
             events = list(
-                session.scalars(select(TaskEventModel).where(TaskEventModel.task_id == task_id))
+                session.scalars(
+                    select(TaskEventModel)
+                    .where(TaskEventModel.task_id == task_id)
+                    .order_by(TaskEventModel.created_at, TaskEventModel.id)
+                )
             )
         assert task is not None
         assert task.status == TaskStatus.SUCCEEDED.value
@@ -133,7 +137,19 @@ def test_worker_success_and_duplicate_delivery_have_one_authoritative_attempt(
         assert [event.event_type for event in events] == [
             "TASK_QUEUED",
             "ATTEMPT_STARTED",
+            "ATTEMPT_PHASE_CHANGED",
+            "ATTEMPT_PHASE_CHANGED",
+            "ATTEMPT_PHASE_CHANGED",
+            "ATTEMPT_PHASE_CHANGED",
+            "ATTEMPT_PHASE_CHANGED",
             "TASK_SUCCEEDED",
+        ]
+        assert [event.payload.get("phase") for event in events[2:-1]] == [
+            "PROVIDER_SUBMITTING",
+            "PROVIDER_RUNNING",
+            "RESULT_FETCHING",
+            "RESULT_PERSISTING",
+            "COMPLETED",
         ]
     finally:
         _cleanup(isolated_session_factory, task_id)

@@ -15,11 +15,13 @@ from museflow.providers import MockProvider, create_provider_from_environment
 from museflow.queue import create_celery_app
 from museflow.runtime import worker_runtime_probe
 from museflow.tasks.execution import ExecuteGenerationAttempt
+from museflow.tasks.execution_semantics import LeaseSettings
 from museflow.tasks.result_publication import ResultPublicationStatus
 
 logger = logging.getLogger(__name__)
 
 celery_app: Celery = create_celery_app()
+_LEASE_SETTINGS = LeaseSettings.from_environment()
 
 
 def _session_factory() -> sessionmaker[Session]:
@@ -39,7 +41,10 @@ def execute_task(task_id: str) -> None:
     provider = MockProvider(scenario=scenario) if scenario else create_provider_from_environment()
     try:
         outcome = ExecuteGenerationAttempt(
-            factory, provider, asset_store=MinioResultAssetStore()
+            factory,
+            provider,
+            asset_store=MinioResultAssetStore(),
+            lease_settings=_LEASE_SETTINGS,
         ).execute(UUID(task_id))
         if outcome.publication_status is ResultPublicationStatus.OWNERSHIP_LOST:
             logger.info(

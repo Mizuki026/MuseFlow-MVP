@@ -15,11 +15,17 @@ from museflow.db.models import (
     TaskEventModel,
 )
 from museflow.db.session import create_session_factory
-from museflow.providers import MockProvider, PermanentProviderError, TransientProviderError
+from museflow.providers import (
+    LeaseChecker,
+    MockProvider,
+    PermanentProviderError,
+    TransientProviderError,
+)
 from museflow.tasks.application import CreateTask, ManualRetryNotAllowedError
 from museflow.tasks.domain import CreateTaskRequest, TaskPolicy, TaskStatus
 from museflow.tasks.execution import ExecuteGenerationAttempt
 from museflow.tasks.execution_models import GenerationAttemptModel
+from museflow.tasks.execution_semantics import AttemptPhase
 from museflow.tasks.recovery import RecoverExpiredLeases, ScheduleDueRetries
 from museflow.tasks.result_publication import PublicationDecision
 
@@ -182,16 +188,23 @@ class CrashOnceProvider:
         request_key: str,
         remote_request_id: str | None,
         on_remote_request_id=None,
+        on_phase=None,
+        lease_guard: LeaseChecker | None = None,
     ):
         self.calls += 1
         if self.calls == 1:
             if self.record_remote_request_id and on_remote_request_id is not None:
+                if on_phase is not None:
+                    on_phase(AttemptPhase.PROVIDER_SUBMITTING)
                 on_remote_request_id("remote-request-1")
             raise SystemExit("simulated worker crash")
         return MockProvider().generate(
             request,
             request_key=request_key,
             remote_request_id=remote_request_id,
+            on_remote_request_id=on_remote_request_id,
+            on_phase=on_phase,
+            lease_guard=lease_guard,
         )
 
 
@@ -263,6 +276,7 @@ def test_result_storage_failure_reuses_same_attempt_and_recovers(
         assert {event.event_type for event in events} == {
             "TASK_QUEUED",
             "ATTEMPT_STARTED",
+            "ATTEMPT_PHASE_CHANGED",
             "RESULT_STORAGE_FAILED",
         }
 
@@ -282,7 +296,7 @@ def test_result_storage_failure_reuses_same_attempt_and_recovers(
         assert task is not None and task.status == TaskStatus.SUCCEEDED.value
         assert len(attempts) == 1
         assert attempts[0].status == "SUCCEEDED"
-        assert attempts[0].phase == "RESULT_PERSISTED"
+        assert attempts[0].phase == "COMPLETED"
     finally:
         _cleanup(isolated_session_factory, task_id)
 
@@ -324,11 +338,11 @@ def test_result_storage_failure_keeps_diagnostic_code_at_deadline(
                 select(GenerationAttemptModel).where(GenerationAttemptModel.task_id == task_id)
             )
         assert task is not None and task.status == TaskStatus.FAILED.value
-        assert task.error_code == "RESULT_STORAGE_ERROR"
+        assert task.error_code == "DEADLINE_EXCEEDED"
         assert attempt is not None
         assert attempt.status == "FAILED"
-        assert attempt.phase == "RESULT_STORAGE_FAILED"
-        assert attempt.error_code == "RESULT_STORAGE_ERROR"
+        assert attempt.phase == "RESULT_PERSISTING"
+        assert attempt.error_code == "DEADLINE_EXCEEDED"
     finally:
         _cleanup(isolated_session_factory, task_id)
 

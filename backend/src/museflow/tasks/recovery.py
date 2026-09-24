@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from museflow.db.models import GenerationTaskModel, OutboxMessageModel, TaskEventModel
 from museflow.tasks.domain import TaskStatus
 from museflow.tasks.execution_models import GenerationAttemptModel
+from museflow.tasks.execution_semantics import AttemptPhase, submission_outcome_is_unknown
 
 
 class ScheduleDueRetries:
@@ -95,16 +96,23 @@ class RecoverExpiredLeases:
                 )
                 if attempt is None or attempt.status != "RUNNING" or attempt.lease_expires_at > now:
                     continue
-                if task.deadline_at <= now:
-                    storage_failed = attempt.error_code == "RESULT_STORAGE_ERROR"
-                    error_code = attempt.error_code if storage_failed else "DEADLINE_EXCEEDED"
+                submission_unknown = submission_outcome_is_unknown(
+                    AttemptPhase(attempt.phase),
+                    has_remote_request_id=attempt.provider_request_id is not None,
+                )
+                if task.deadline_at <= now or submission_unknown:
+                    error_code = (
+                        "PROVIDER_SUBMISSION_UNKNOWN"
+                        if submission_unknown
+                        else "DEADLINE_EXCEEDED"
+                    )
                     error_message = (
-                        attempt.error_message
-                        if storage_failed and attempt.error_message
+                        "provider may have accepted the creation request; "
+                        "automatic resubmission is disabled"
+                        if submission_unknown
                         else "task deadline exceeded"
                     )
                     attempt.status = "FAILED"
-                    attempt.phase = "RESULT_STORAGE_FAILED" if storage_failed else "LEASE_EXPIRED"
                     attempt.error_code = error_code
                     attempt.error_message = error_message
                     attempt.finished_at = now
@@ -112,6 +120,7 @@ class RecoverExpiredLeases:
                     task.error_code = error_code
                     task.error_message = error_message
                     task.completed_at = now
+                    task.next_attempt_at = None
                     event_type = "TASK_FAILED"
                 else:
                     task.status = TaskStatus.QUEUED.value
@@ -124,7 +133,12 @@ class RecoverExpiredLeases:
                         id=uuid4(),
                         task_id=task.id,
                         event_type=event_type,
-                        payload={"attempt_id": str(attempt.id), "error_code": task.error_code},
+                    payload={
+                        "attempt_id": str(attempt.id),
+                        "error_code": task.error_code,
+                        "deadline_exceeded": task.deadline_at <= now,
+                        "possible_external_call": submission_unknown,
+                    },
                         created_at=now,
                     )
                 )

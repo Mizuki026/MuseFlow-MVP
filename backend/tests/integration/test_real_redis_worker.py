@@ -9,6 +9,7 @@ from sqlalchemy import delete, select
 
 from museflow.db.models import GenerationTaskModel, OutboxMessageModel, TaskEventModel
 from museflow.db.session import create_session_factory
+from museflow.providers import MockProvider
 from museflow.queue import CeleryTaskPublisher, create_celery_app
 from museflow.tasks.application import CreateTask
 from museflow.tasks.dispatcher import OutboxDispatcher
@@ -24,17 +25,27 @@ def test_real_redis_scheduler_worker_path() -> None:
         pytest.skip("MUSEFLOW_TEST_DATABASE_URL is required")
 
     factory = create_session_factory(database_url)
+    lease_seconds = float(os.environ.get("MUSEFLOW_LEASE_SECONDS", "240"))
+    if lease_seconds >= MockProvider.LONG_RUNNING_DELAY_SECONDS:
+        pytest.skip("set MUSEFLOW_LEASE_SECONDS below the long-running mock duration")
     task_id = (
         CreateTask(factory)
-        .execute(CreateTaskRequest(prompt="real redis worker"), f"real-redis-{uuid4()}")
+        .execute(
+            CreateTaskRequest(
+                prompt="real redis worker",
+                execution_profile="long_running_success",
+            ),
+            f"real-redis-{uuid4()}",
+        )
         .task.id
     )
     try:
         redis_url = os.environ.get("REDIS_URL", "redis://127.0.0.1:6379/0")
         publisher = CeleryTaskPublisher(create_celery_app(redis_url))
         assert OutboxDispatcher(factory, publisher).dispatch_once(limit=1000) >= 1
+        publisher.publish(task_id)
 
-        deadline = time.monotonic() + 10
+        deadline = time.monotonic() + 20
         status = TaskStatus.QUEUED.value
         while time.monotonic() < deadline:
             with factory() as session:
@@ -52,7 +63,18 @@ def test_real_redis_scheduler_worker_path() -> None:
                     select(GenerationAttemptModel).where(GenerationAttemptModel.task_id == task_id)
                 )
             )
+            events = list(
+                session.scalars(
+                    select(TaskEventModel).where(TaskEventModel.task_id == task_id)
+                )
+            )
+            task = session.get(GenerationTaskModel, task_id)
         assert len(attempts) == 1
+        assert attempts[0].phase == "COMPLETED"
+        assert attempts[0].provider_request_id is not None
+        assert task is not None and task.completed_at is not None
+        assert (task.completed_at - attempts[0].started_at).total_seconds() > lease_seconds
+        assert all(event.event_type != "ATTEMPT_RECLAIMED" for event in events)
     finally:
         with factory.begin() as session:
             session.execute(

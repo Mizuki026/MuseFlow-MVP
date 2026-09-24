@@ -22,9 +22,28 @@ from museflow.providers import (
     GenerationRequest,
     GenerationResult,
     ProviderError,
+    ProviderSubmissionUnknownError,
 )
 from museflow.tasks.domain import RetryPolicy, TaskStatus
 from museflow.tasks.execution_models import GenerationAttemptModel
+from museflow.tasks.execution_semantics import (
+    AttemptPhase,
+    FailureAction,
+    FailureDomain,
+    LeaseSettings,
+    can_schedule_new_attempt,
+    classify_failure_domain,
+    decide_failure_action,
+    next_phase_for_recovery,
+    phase_transition_allowed,
+    submission_outcome_is_unknown,
+)
+from museflow.tasks.lease_guard import (
+    LeaseGuard,
+    LeaseState,
+    OwnershipLostError,
+    TaskDeadlineExceededError,
+)
 from museflow.tasks.result_publication import (
     PublicationDecision,
     ResultPointer,
@@ -41,6 +60,7 @@ class ExecutionClaim:
     attempt_id: UUID
     sequence: int
     execution_token: UUID
+    phase: AttemptPhase
     provider_request_key: str
     remote_request_id: str | None
     request: GenerationRequest
@@ -54,6 +74,7 @@ class ExecutionOutcome:
     succeeded: bool
     publication_status: ResultPublicationStatus | None = None
     candidate_persisted: bool = False
+    failure_code: str | None = None
 
 
 class ExecuteGenerationAttempt:
@@ -65,6 +86,8 @@ class ExecuteGenerationAttempt:
         asset_store: ResultAssetStore | None = None,
         clock: Callable[[], datetime] | None = None,
         lease_seconds: int = 240,
+        heartbeat_interval_seconds: float | None = None,
+        lease_settings: LeaseSettings | None = None,
         token_factory: Callable[[], UUID] = uuid4,
         random_source: Callable[[], float] = random.random,
         retry_policy: RetryPolicy | None = None,
@@ -73,7 +96,10 @@ class ExecuteGenerationAttempt:
         self._provider = provider
         self._asset_store = asset_store
         self._clock = clock or (lambda: datetime.now(UTC))
-        self._lease_seconds = lease_seconds
+        if lease_settings is None:
+            heartbeat = heartbeat_interval_seconds or min(30.0, lease_seconds / 3)
+            lease_settings = LeaseSettings(lease_seconds, heartbeat)
+        self._lease_settings = lease_settings
         self._token_factory = token_factory
         self._random_source = random_source
         self._retry_policy = retry_policy or RetryPolicy()
@@ -82,58 +108,150 @@ class ExecuteGenerationAttempt:
         claim = self._claim(task_id)
         if claim is None:
             return ExecutionOutcome(task_id, None, executed=False, succeeded=False)
+        deadline_at = claim.request.deadline_at
+        assert deadline_at is not None
+        guard = LeaseGuard(
+            self._session_factory,
+            task_id=claim.task_id,
+            attempt_id=claim.attempt_id,
+            execution_token=claim.execution_token,
+            deadline_at=deadline_at,
+            settings=self._lease_settings,
+            clock=self._clock,
+        )
+        current_phase = claim.phase
+        current_remote_id = claim.remote_request_id
         try:
-            result = self._provider.generate(
-                claim.request,
-                request_key=claim.provider_request_key,
-                remote_request_id=claim.remote_request_id,
-                on_remote_request_id=lambda remote_id: self._record_provider_request_id(
-                    claim, remote_id
-                ),
-            )
-        except Exception as error:
-            self._fail(claim, error)
-            return ExecutionOutcome(task_id, claim.attempt_id, executed=True, succeeded=False)
+            with guard:
+                if claim.phase is AttemptPhase.INPUT_LOADING:
+                    self._set_phase(claim, AttemptPhase.INPUT_LOADING, guard)
 
-        try:
-            self._mark_result_persisting(claim)
-            stored = self._store_result(claim, result)
-        except ValueError as error:
-            self._fail(
-                claim,
-                ProviderError("RESULT_INVALID", str(error), retryable=False),
-            )
-            return ExecutionOutcome(task_id, claim.attempt_id, executed=True, succeeded=False)
-        except Exception:
-            self._record_result_storage_failure(claim)
-            logger.exception(
-                "result storage failed",
-                extra={
-                    "task_id": str(claim.task_id),
-                    "attempt_id": str(claim.attempt_id),
-                    "provider_name": getattr(self._provider, "name", "mock"),
-                    "error_code": "RESULT_STORAGE_ERROR",
-                },
-            )
-            raise
+                def on_phase(phase: AttemptPhase) -> None:
+                    nonlocal current_phase
+                    if tuple(AttemptPhase).index(phase) < tuple(AttemptPhase).index(
+                        current_phase
+                    ):
+                        guard.require_ownership()
+                        return
+                    self._set_phase(claim, phase, guard)
+                    current_phase = phase
 
-        # Candidate upload precedes the fenced DB transaction. A DB error escapes
-        # without marking success; lease recovery retries this same logical attempt.
-        decision = self._succeed(claim, result, stored)
-        succeeded = decision in {
-            PublicationDecision.PUBLISHED,
-            PublicationDecision.ALREADY_PUBLISHED,
-        }
-        publication_status = None
-        if stored is not None:
-            publication_status = ResultPublicationStatus(decision.value)
+                def on_remote_request_id(remote_id: str) -> None:
+                    nonlocal current_remote_id, current_phase
+                    self._record_provider_request_id(claim, remote_id, guard)
+                    current_remote_id = remote_id
+                    current_phase = AttemptPhase.PROVIDER_RUNNING
+
+                try:
+                    result = self._provider.generate(
+                        claim.request,
+                        request_key=claim.provider_request_key,
+                        remote_request_id=claim.remote_request_id,
+                        on_remote_request_id=on_remote_request_id,
+                        on_phase=on_phase,
+                        lease_guard=guard,
+                    )
+                except Exception as error:
+                    if guard.state is LeaseState.OWNED:
+                        guard.check()
+                    if guard.state is LeaseState.OWNERSHIP_LOST:
+                        return self._outcome(claim, succeeded=False)
+                    if guard.state is LeaseState.DEADLINE_EXCEEDED:
+                        self._mark_deadline(claim)
+                        return self._outcome(claim, succeeded=False, error_code="DEADLINE_EXCEEDED")
+                    if (
+                        not isinstance(error, ProviderError)
+                        and current_phase is AttemptPhase.PROVIDER_SUBMITTING
+                        and current_remote_id is None
+                    ):
+                        error = ProviderSubmissionUnknownError()
+                    return self._handle_failure(
+                        claim,
+                        guard,
+                        error,
+                        phase=current_phase,
+                        remote_request_id=current_remote_id,
+                    )
+
+                try:
+                    guard.require_ownership()
+                    self._set_phase(claim, AttemptPhase.RESULT_PERSISTING, guard)
+                    current_phase = AttemptPhase.RESULT_PERSISTING
+                except OwnershipLostError:
+                    return self._outcome(claim, succeeded=False)
+                except TaskDeadlineExceededError:
+                    self._mark_deadline(claim)
+                    return self._outcome(claim, succeeded=False, error_code="DEADLINE_EXCEEDED")
+
+                try:
+                    guard.require_ownership()
+                    stored = self._store_result(claim, result)
+                    guard.require_ownership()
+                except ValueError as error:
+                    return self._handle_failure(
+                        claim,
+                        guard,
+                        ProviderError("RESULT_INVALID", str(error), retryable=False),
+                        phase=AttemptPhase.RESULT_PERSISTING,
+                        remote_request_id=current_remote_id,
+                    )
+                except Exception:
+                    if guard.state is LeaseState.OWNERSHIP_LOST:
+                        return self._outcome(claim, succeeded=False)
+                    if guard.state is LeaseState.DEADLINE_EXCEEDED:
+                        self._mark_deadline(claim)
+                        return self._outcome(
+                            claim, succeeded=False, error_code="DEADLINE_EXCEEDED"
+                        )
+                    self._record_result_storage_failure(claim)
+                    logger.exception(
+                        "result storage failed",
+                        extra={
+                            "task_id": str(claim.task_id),
+                            "attempt_id": str(claim.attempt_id),
+                            "provider_name": getattr(self._provider, "name", "mock"),
+                            "error_code": "RESULT_STORAGE_ERROR",
+                        },
+                    )
+                    raise
+
+                guard.require_ownership()
+                # Candidate upload precedes the fenced DB transaction. A DB error leaves the
+                # attempt in RESULT_PERSISTING so the same logical attempt can be reclaimed.
+                decision = self._succeed(claim, result, stored)
+                succeeded = decision in {
+                    PublicationDecision.PUBLISHED,
+                    PublicationDecision.ALREADY_PUBLISHED,
+                }
+                publication_status = (
+                    ResultPublicationStatus(decision.value) if stored is not None else None
+                )
+                return ExecutionOutcome(
+                    task_id,
+                    claim.attempt_id,
+                    executed=True,
+                    succeeded=succeeded,
+                    publication_status=publication_status,
+                    candidate_persisted=stored is not None,
+                )
+        except OwnershipLostError:
+            return self._outcome(claim, succeeded=False)
+        except TaskDeadlineExceededError:
+            self._mark_deadline(claim)
+            return self._outcome(claim, succeeded=False, error_code="DEADLINE_EXCEEDED")
+        finally:
+            guard.stop()
+
+    @staticmethod
+    def _outcome(
+        claim: ExecutionClaim, *, succeeded: bool, error_code: str | None = None
+    ) -> ExecutionOutcome:
         return ExecutionOutcome(
-            task_id,
+            claim.task_id,
             claim.attempt_id,
             executed=True,
             succeeded=succeeded,
-            publication_status=publication_status,
-            candidate_persisted=stored is not None,
+            failure_code=error_code,
         )
 
     def _store_result(self, claim: ExecutionClaim, result: GenerationResult) -> StoredAsset | None:
@@ -156,20 +274,36 @@ class ExecuteGenerationAttempt:
             raise RuntimeError("result asset store returned metadata for a different candidate")
         return stored
 
-    def _mark_result_persisting(self, claim: ExecutionClaim) -> bool:
+    def _set_phase(
+        self, claim: ExecutionClaim, target: AttemptPhase, guard: LeaseGuard
+    ) -> None:
+        guard.require_ownership()
         now = self._clock()
         with self._session_factory.begin() as session:
             task = session.get(GenerationTaskModel, claim.task_id, with_for_update=True)
             attempt = session.get(GenerationAttemptModel, claim.attempt_id, with_for_update=True)
-            if (
-                attempt is None
-                or task is None
-                or not self._claim_is_current(attempt, task, claim, now)
-            ):
-                return False
-            attempt.phase = "RESULT_PERSISTING"
+            if not self._claim_is_current(attempt, task, claim, now):
+                guard.invalidate_ownership()
+                raise OwnershipLostError("execution ownership was lost")
+            assert attempt is not None and task is not None
+            current = self._stored_phase(attempt.phase, attempt.status)
+            if not phase_transition_allowed(current, target):
+                raise ValueError(
+                    f"attempt phase cannot move from {current.value} to {target.value}"
+                )
+            if current is target:
+                return
+            attempt.phase = target.value
             task.version += 1
-            return True
+            session.add(
+                TaskEventModel(
+                    id=uuid4(),
+                    task_id=claim.task_id,
+                    event_type="ATTEMPT_PHASE_CHANGED",
+                    payload={"attempt_id": str(claim.attempt_id), "phase": target.value},
+                    created_at=now,
+                )
+            )
 
     def _record_result_storage_failure(self, claim: ExecutionClaim) -> bool:
         now = self._clock()
@@ -184,7 +318,6 @@ class ExecuteGenerationAttempt:
                 or not self._claim_is_current(attempt, task, claim, now)
             ):
                 return False
-            attempt.phase = "RESULT_PERSISTING"
             attempt.error_code = error_code
             attempt.error_message = error_message
             task.error_code = error_code
@@ -211,38 +344,56 @@ class ExecuteGenerationAttempt:
             )
             if task is None or task.status in (TaskStatus.SUCCEEDED.value, TaskStatus.FAILED.value):
                 return None
-            if task.deadline_at <= now:
-                self._mark_deadline_locked(session, task, now)
-                return None
             if task.status == TaskStatus.RETRY_WAIT.value and (
                 task.next_attempt_at is None or task.next_attempt_at > now
             ):
                 return None
-
             latest = session.scalar(
                 select(GenerationAttemptModel)
                 .where(GenerationAttemptModel.task_id == task_id)
                 .order_by(GenerationAttemptModel.sequence.desc())
                 .with_for_update()
             )
+            if task.deadline_at <= now:
+                self._mark_deadline_locked(session, task, now, latest)
+                return None
             if latest is not None and latest.status == "SUCCEEDED":
                 return None
             if latest is not None and latest.status == "RUNNING" and latest.lease_expires_at > now:
                 return None
+            if latest is not None and latest.status == "RUNNING":
+                latest_phase = self._stored_phase(latest.phase, latest.status)
+                has_remote_id = latest.provider_request_id is not None
+                if (
+                    next_phase_for_recovery(
+                        latest_phase, has_remote_request_id=has_remote_id
+                    )
+                    is None
+                ):
+                    if submission_outcome_is_unknown(
+                        latest_phase, has_remote_request_id=has_remote_id
+                    ):
+                        self._mark_submission_unknown_locked(session, task, latest, now)
+                    return None
 
             if latest is None or latest.status == "FAILED":
+                if latest is not None and latest.provider_request_id is not None:
+                    return None
                 sequence = 1 if latest is None else latest.sequence + 1
                 attempt = GenerationAttemptModel(
                     id=uuid4(),
                     task_id=task_id,
                     sequence=sequence,
                     status="RUNNING",
-                    phase="PROVIDER_RUNNING",
+                    phase=AttemptPhase.INPUT_LOADING.value,
                     provider_name=getattr(self._provider, "name", "mock"),
                     provider_request_key=f"{task_id}:attempt:{sequence}",
-                    provider_request_id=latest.provider_request_id if latest is not None else None,
+                    provider_request_id=None,
                     execution_token=self._token_factory(),
-                    lease_expires_at=now + timedelta(seconds=self._lease_seconds),
+                    lease_expires_at=min(
+                        now + timedelta(seconds=self._lease_settings.lease_seconds),
+                        task.deadline_at,
+                    ),
                     started_at=now,
                 )
                 session.add(attempt)
@@ -251,9 +402,10 @@ class ExecuteGenerationAttempt:
                 attempt = latest
                 sequence = attempt.sequence
                 attempt.status = "RUNNING"
-                attempt.phase = "PROVIDER_RUNNING"
                 attempt.execution_token = self._token_factory()
-                attempt.lease_expires_at = now + timedelta(seconds=self._lease_seconds)
+                attempt.lease_expires_at = min(
+                    now + timedelta(seconds=self._lease_settings.lease_seconds), task.deadline_at
+                )
                 attempt.error_code = None
                 attempt.error_message = None
                 attempt.finished_at = None
@@ -261,6 +413,8 @@ class ExecuteGenerationAttempt:
 
             task.status = TaskStatus.RUNNING.value
             task.next_attempt_at = None
+            task.error_code = None
+            task.error_message = None
             task.started_at = task.started_at or now
             task.version += 1
             session.add(
@@ -268,7 +422,11 @@ class ExecuteGenerationAttempt:
                     id=uuid4(),
                     task_id=task_id,
                     event_type=event_type,
-                    payload={"attempt_id": str(attempt.id), "sequence": sequence},
+                    payload={
+                        "attempt_id": str(attempt.id),
+                        "sequence": sequence,
+                        "phase": attempt.phase,
+                    },
                     created_at=now,
                 )
             )
@@ -277,6 +435,7 @@ class ExecuteGenerationAttempt:
                 attempt_id=attempt.id,
                 sequence=sequence,
                 execution_token=attempt.execution_token,
+                phase=self._stored_phase(attempt.phase, attempt.status),
                 provider_request_key=attempt.provider_request_key,
                 remote_request_id=attempt.provider_request_id,
                 request=GenerationRequest(
@@ -286,15 +445,92 @@ class ExecuteGenerationAttempt:
                 ),
             )
 
-    def _record_provider_request_id(self, claim: ExecutionClaim, provider_request_id: str) -> None:
+    @staticmethod
+    def _stored_phase(phase: str, attempt_status: str) -> AttemptPhase:
+        try:
+            return AttemptPhase(phase)
+        except ValueError:
+            if attempt_status == "SUCCEEDED":
+                return AttemptPhase.COMPLETED
+            # MVP records used terminal phase labels; active pre-stage rows only used
+            # PROVIDER_RUNNING and RESULT_PERSISTING, so unknown active values fail closed.
+            raise ValueError(f"unsupported active attempt phase: {phase}") from None
+
+    @staticmethod
+    def _mark_submission_unknown_locked(
+        session: Session,
+        task: GenerationTaskModel,
+        attempt: GenerationAttemptModel,
+        now: datetime,
+    ) -> None:
+        code = "PROVIDER_SUBMISSION_UNKNOWN"
+        message = (
+            "provider may have accepted the creation request; "
+            "automatic resubmission is disabled"
+        )
+        attempt.status = "FAILED"
+        attempt.error_code = code
+        attempt.error_message = message
+        attempt.finished_at = now
+        task.status = TaskStatus.FAILED.value
+        task.error_code = code
+        task.error_message = message
+        task.completed_at = now
+        task.next_attempt_at = None
+        task.version += 1
+        session.add(
+            TaskEventModel(
+                id=uuid4(),
+                task_id=task.id,
+                event_type="TASK_FAILED",
+                payload={
+                    "attempt_id": str(attempt.id),
+                    "error_code": code,
+                    "possible_external_call": True,
+                },
+                created_at=now,
+            )
+        )
+
+    def _record_provider_request_id(
+        self, claim: ExecutionClaim, provider_request_id: str, guard: LeaseGuard
+    ) -> None:
+        guard.require_ownership()
+        now = self._clock()
         with self._session_factory.begin() as session:
+            task = session.get(GenerationTaskModel, claim.task_id, with_for_update=True)
             attempt = session.get(GenerationAttemptModel, claim.attempt_id, with_for_update=True)
-            if (
-                attempt is not None
-                and attempt.execution_token == claim.execution_token
-                and attempt.status == "RUNNING"
-            ):
-                attempt.provider_request_id = provider_request_id
+            if not self._claim_is_current(attempt, task, claim, now):
+                guard.invalidate_ownership()
+                raise OwnershipLostError("execution ownership was lost")
+            assert attempt is not None and task is not None
+            if attempt.provider_request_id not in (None, provider_request_id):
+                guard.invalidate_ownership()
+                raise OwnershipLostError("a different remote request is already recorded")
+            current = self._stored_phase(attempt.phase, attempt.status)
+            if not phase_transition_allowed(current, AttemptPhase.PROVIDER_RUNNING):
+                raise ValueError("remote request ID arrived in an invalid attempt phase")
+            changed = attempt.provider_request_id is None or (
+                current is not AttemptPhase.PROVIDER_RUNNING
+            )
+            attempt.provider_request_id = provider_request_id
+            if current is not AttemptPhase.PROVIDER_RUNNING:
+                attempt.phase = AttemptPhase.PROVIDER_RUNNING.value
+            if changed:
+                task.version += 1
+                session.add(
+                    TaskEventModel(
+                        id=uuid4(),
+                        task_id=claim.task_id,
+                        event_type="ATTEMPT_PHASE_CHANGED",
+                        payload={
+                            "attempt_id": str(claim.attempt_id),
+                            "phase": AttemptPhase.PROVIDER_RUNNING.value,
+                            "remote_request_saved": True,
+                        },
+                        created_at=now,
+                    )
+                )
 
     def _succeed(
         self, claim: ExecutionClaim, result: GenerationResult, stored: StoredAsset | None
@@ -347,6 +583,7 @@ class ExecuteGenerationAttempt:
                 decision = decide_result_publication(
                     token_matches=attempt.execution_token == claim.execution_token,
                     lease_active=attempt.lease_expires_at > now,
+                    deadline_active=task.deadline_at > now,
                     attempt_status=attempt.status,
                     task_status=task.status,
                     claim_attempt_id=claim.attempt_id,
@@ -371,8 +608,9 @@ class ExecuteGenerationAttempt:
                     )
                 )
             attempt.status = "SUCCEEDED"
-            attempt.phase = "RESULT_PERSISTED"
-            attempt.provider_request_id = result.provider_request_id
+            attempt.phase = AttemptPhase.COMPLETED.value
+            if result.provider_request_id is not None:
+                attempt.provider_request_id = result.provider_request_id
             attempt.result_digest = stored.sha256 if stored is not None else result.result_digest
             attempt.result_metadata = asdict(stored) if stored is not None else result.metadata
             attempt.finished_at = now
@@ -382,6 +620,18 @@ class ExecuteGenerationAttempt:
             task.error_code = None
             task.error_message = None
             task.version += 1
+            session.add(
+                TaskEventModel(
+                    id=uuid4(),
+                    task_id=claim.task_id,
+                    event_type="ATTEMPT_PHASE_CHANGED",
+                    payload={
+                        "attempt_id": str(claim.attempt_id),
+                        "phase": AttemptPhase.COMPLETED.value,
+                    },
+                    created_at=now,
+                )
+            )
             session.add(
                 TaskEventModel(
                     id=uuid4(),
@@ -396,9 +646,112 @@ class ExecuteGenerationAttempt:
             )
         return PublicationDecision.PUBLISHED
 
-    def _fail(self, claim: ExecutionClaim, error: Exception) -> bool:
+    def _handle_failure(
+        self,
+        claim: ExecutionClaim,
+        guard: LeaseGuard,
+        error: Exception,
+        *,
+        phase: AttemptPhase,
+        remote_request_id: str | None,
+    ) -> ExecutionOutcome:
+        if isinstance(error, OwnershipLostError) or guard.state is LeaseState.OWNERSHIP_LOST:
+            return self._outcome(claim, succeeded=False)
+        if isinstance(error, TaskDeadlineExceededError) or (
+            guard.state is LeaseState.DEADLINE_EXCEEDED
+        ):
+            self._mark_deadline(claim)
+            return self._outcome(claim, succeeded=False, error_code="DEADLINE_EXCEEDED")
+
+        if isinstance(error, ProviderError):
+            code = error.code
+            retryable = error.retryable
+            submission_unknown = error.submission_state_unknown
+            domain = classify_failure_domain(code, phase)
+        elif phase is AttemptPhase.PROVIDER_SUBMITTING and remote_request_id is None:
+            unknown = ProviderSubmissionUnknownError()
+            code = unknown.code
+            retryable = False
+            submission_unknown = True
+            domain = FailureDomain.PROVIDER_SUBMISSION
+            error = unknown
+        elif phase is AttemptPhase.RESULT_PERSISTING:
+            code = "RESULT_STORAGE_ERROR"
+            retryable = True
+            submission_unknown = False
+            domain = FailureDomain.RESULT_PERSISTENCE
+        elif phase is AttemptPhase.RESULT_FETCHING and remote_request_id is not None:
+            code = "RESULT_FETCH_UNAVAILABLE"
+            retryable = True
+            submission_unknown = False
+            domain = FailureDomain.RESULT_FETCHING
+        else:
+            code = "EXECUTION_FAILED"
+            retryable = False
+            submission_unknown = False
+            domain = FailureDomain.PLATFORM_CONFIGURATION
+
+        action = decide_failure_action(
+            domain=domain,
+            retryable=retryable,
+            phase=phase,
+            has_remote_request_id=remote_request_id is not None,
+            submission_state_unknown=submission_unknown,
+        )
+        if action is FailureAction.STOP:
+            return self._outcome(claim, succeeded=False)
+        if action is FailureAction.RETRY_SAME_ATTEMPT:
+            self._record_same_attempt_recovery(claim, code, str(error))
+            return self._outcome(claim, succeeded=False, error_code=code)
+
+        self._fail(
+            claim,
+            error,
+            code=code,
+            retryable=retryable,
+            allow_new_attempt=action is FailureAction.CREATE_NEW_ATTEMPT,
+        )
+        return self._outcome(claim, succeeded=False, error_code=code)
+
+    def _record_same_attempt_recovery(
+        self, claim: ExecutionClaim, error_code: str, error_message: str
+    ) -> bool:
         now = self._clock()
-        code, retryable = self._error_details(error)
+        with self._session_factory.begin() as session:
+            task = session.get(GenerationTaskModel, claim.task_id, with_for_update=True)
+            attempt = session.get(GenerationAttemptModel, claim.attempt_id, with_for_update=True)
+            if not self._claim_is_current(attempt, task, claim, now):
+                return False
+            assert attempt is not None and task is not None
+            attempt.error_code = error_code
+            attempt.error_message = error_message
+            task.error_code = error_code
+            task.error_message = error_message
+            task.version += 1
+            session.add(
+                TaskEventModel(
+                    id=uuid4(),
+                    task_id=claim.task_id,
+                    event_type="ATTEMPT_RECOVERY_PENDING",
+                    payload={"attempt_id": str(claim.attempt_id), "error_code": error_code},
+                    created_at=now,
+                )
+            )
+            return True
+
+    def _fail(
+        self,
+        claim: ExecutionClaim,
+        error: Exception,
+        *,
+        code: str | None = None,
+        retryable: bool | None = None,
+        allow_new_attempt: bool = False,
+    ) -> bool:
+        now = self._clock()
+        error_code, inferred_retryable = self._error_details(error)
+        code = code or error_code
+        retryable = inferred_retryable if retryable is None else retryable
         with self._session_factory.begin() as session:
             task = session.get(GenerationTaskModel, claim.task_id, with_for_update=True)
             attempt = session.scalar(
@@ -413,16 +766,26 @@ class ExecuteGenerationAttempt:
             ):
                 return False
             attempt.status = "FAILED"
-            attempt.phase = "PROVIDER_FAILED"
             attempt.error_code = code
             attempt.error_message = str(error)
             attempt.finished_at = now
             next_at = now
-            can_retry = retryable and claim.sequence < task.max_attempts
-            if can_retry:
+            if retryable:
                 delay = self._retry_policy.delay_seconds(claim.sequence, self._random_source())
                 next_at = now + timedelta(seconds=delay)
-                can_retry = next_at < task.deadline_at
+            can_retry = can_schedule_new_attempt(
+                action=(
+                    FailureAction.CREATE_NEW_ATTEMPT
+                    if allow_new_attempt
+                    else FailureAction.FAIL
+                ),
+                attempts_used=claim.sequence,
+                max_attempts=task.max_attempts,
+                has_recoverable_remote_request=attempt.provider_request_id is not None,
+                now=now,
+                deadline_at=task.deadline_at,
+                next_attempt_at=next_at,
+            )
             if can_retry:
                 task.status = TaskStatus.RETRY_WAIT.value
                 task.next_attempt_at = next_at
@@ -457,7 +820,7 @@ class ExecuteGenerationAttempt:
     def _error_details(error: Exception) -> tuple[str, bool]:
         if isinstance(error, ProviderError):
             return error.code, error.retryable
-        return "PROVIDER_UNAVAILABLE", True
+        return "EXECUTION_FAILED", False
 
     @staticmethod
     def _claim_is_current(
@@ -472,14 +835,57 @@ class ExecuteGenerationAttempt:
             and attempt.execution_token == claim.execution_token
             and attempt.lease_expires_at > now
             and attempt.status == "RUNNING"
-            and task.status not in (TaskStatus.SUCCEEDED.value, TaskStatus.FAILED.value)
+            and task.status == TaskStatus.RUNNING.value
+            and task.deadline_at > now
         )
 
-    @staticmethod
-    def _mark_deadline_locked(session: Session, task: GenerationTaskModel, now: datetime) -> None:
+    def _mark_deadline(self, claim: ExecutionClaim) -> bool:
+        now = self._clock()
+        with self._session_factory.begin() as session:
+            task = session.get(GenerationTaskModel, claim.task_id, with_for_update=True)
+            attempt = session.get(GenerationAttemptModel, claim.attempt_id, with_for_update=True)
+            if (
+                task is None
+                or attempt is None
+                or attempt.status != "RUNNING"
+                or attempt.execution_token != claim.execution_token
+                or task.status != TaskStatus.RUNNING.value
+                or task.deadline_at > now
+            ):
+                return False
+            self._mark_deadline_locked(session, task, now, attempt)
+            return True
+
+    @classmethod
+    def _mark_deadline_locked(
+        cls,
+        session: Session,
+        task: GenerationTaskModel,
+        now: datetime,
+        attempt: GenerationAttemptModel | None,
+    ) -> None:
+        unknown_submission = bool(
+            attempt is not None
+            and submission_outcome_is_unknown(
+                cls._stored_phase(attempt.phase, attempt.status),
+                has_remote_request_id=attempt.provider_request_id is not None,
+            )
+        )
+        code = "PROVIDER_SUBMISSION_UNKNOWN" if unknown_submission else "DEADLINE_EXCEEDED"
+        message = (
+            "task deadline exceeded while provider submission outcome was unknown; "
+            "the provider may have accepted it"
+            if unknown_submission
+            else "task deadline exceeded"
+        )
+        if attempt is not None and attempt.status == "RUNNING":
+            attempt.status = "FAILED"
+            attempt.error_code = code
+            attempt.error_message = message
+            attempt.finished_at = now
         task.status = TaskStatus.FAILED.value
-        task.error_code = "DEADLINE_EXCEEDED"
-        task.error_message = "task deadline exceeded"
+        task.error_code = code
+        task.error_message = message
         task.completed_at = now
         task.next_attempt_at = None
         task.version += 1
@@ -488,7 +894,12 @@ class ExecuteGenerationAttempt:
                 id=uuid4(),
                 task_id=task.id,
                 event_type="TASK_FAILED",
-                payload={"error_code": "DEADLINE_EXCEEDED"},
+                payload={
+                    "attempt_id": str(attempt.id) if attempt is not None else None,
+                    "error_code": code,
+                    "deadline_exceeded": True,
+                    "possible_external_call": unknown_submission,
+                },
                 created_at=now,
             )
         )

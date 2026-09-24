@@ -5,6 +5,7 @@ import os
 import struct
 import zlib
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from threading import Event
 from uuid import UUID, uuid4
@@ -27,11 +28,12 @@ from museflow.db.models import (
     TaskEventModel,
 )
 from museflow.db.session import create_session_factory
-from museflow.providers import GenerationRequest, GenerationResult, MockProvider
+from museflow.providers import GenerationRequest, GenerationResult, LeaseChecker, MockProvider
 from museflow.tasks.application import CreateTask
 from museflow.tasks.domain import CreateTaskRequest, TaskStatus
 from museflow.tasks.execution import ExecuteGenerationAttempt
 from museflow.tasks.execution_models import GenerationAttemptModel
+from museflow.tasks.execution_semantics import AttemptPhase
 from museflow.tasks.recovery import RecoverExpiredLeases
 from museflow.tasks.result_publication import PublicationDecision, ResultPublicationStatus
 
@@ -93,13 +95,29 @@ class StaticProvider:
         request_key: str,
         remote_request_id: str | None,
         on_remote_request_id=None,
+        on_phase=None,
+        lease_guard: LeaseChecker | None = None,
     ) -> GenerationResult:
-        del request, request_key, remote_request_id, on_remote_request_id
+        del request
+        if lease_guard is not None:
+            lease_guard.require_ownership()
+        if remote_request_id is None:
+            if on_phase is not None:
+                on_phase(AttemptPhase.PROVIDER_SUBMITTING)
+            remote_request_id = self._result.provider_request_id or f"static-{request_key}"
+            if on_remote_request_id is not None:
+                on_remote_request_id(remote_request_id)
+        if on_phase is not None:
+            on_phase(AttemptPhase.PROVIDER_RUNNING)
         if self._started is not None:
             self._started.set()
         if self._resume is not None and not self._resume.wait(timeout=10):
             raise TimeoutError("stale worker was not resumed")
-        return self._result
+        if lease_guard is not None:
+            lease_guard.require_ownership()
+        if on_phase is not None:
+            on_phase(AttemptPhase.RESULT_FETCHING)
+        return replace(self._result, provider_request_id=remote_request_id)
 
 
 class CapturingExecuteGenerationAttempt(ExecuteGenerationAttempt):
@@ -238,8 +256,8 @@ def test_new_worker_result_stays_authoritative_when_stale_worker_writes_later() 
             resume_stale.set()
             stale_outcome = stale_future.result(timeout=10)
             assert stale_outcome.succeeded is False
-            assert stale_outcome.publication_status is ResultPublicationStatus.OWNERSHIP_LOST
-            assert stale_outcome.candidate_persisted is True
+            assert stale_outcome.publication_status is None
+            assert stale_outcome.candidate_persisted is False
 
         with factory() as session:
             task = session.get(GenerationTaskModel, task_id)
@@ -258,7 +276,6 @@ def test_new_worker_result_stays_authoritative_when_stale_worker_writes_later() 
         assert assets[0].sha256 == winning_candidate.sha256
         assert _read_object(minio, bucket, assets[0].object_key) == winning_result.content
         assert stale_key != winning_candidate.object_key
-        assert _read_object(minio, bucket, stale_key) == stale_result.content
 
         client = TestClient(create_app(session_factory=factory, asset_store=store))
         detail = client.get(f"/api/v1/tasks/{task_id}")
@@ -350,8 +367,9 @@ def test_database_publication_failure_does_not_mark_task_succeeded_and_recovers_
     try:
         event.listen(factory, "before_commit", fail_success_commit)
         try:
+            provider = MockProvider()
             execute = ExecuteGenerationAttempt(
-                factory, MockProvider(), asset_store=store, clock=clock, lease_seconds=10
+                factory, provider, asset_store=store, clock=clock, lease_seconds=10
             )
             with pytest.raises(RuntimeError, match="database publication outage"):
                 execute.execute(task_id)
@@ -402,8 +420,11 @@ def test_database_publication_failure_does_not_mark_task_succeeded_and_recovers_
             )
         assert task is not None and task.status == TaskStatus.SUCCEEDED.value
         assert len(attempts) == 1
+        assert attempts[0].phase == AttemptPhase.COMPLETED.value
         assert len(assets) == 1
         assert assets[0].object_key == next(iter(candidate_keys))
+        assert provider.create_calls == 1
+        assert provider.recovery_calls == 1
     finally:
         for object_key in candidate_keys:
             minio.remove_object(bucket, object_key)

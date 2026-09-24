@@ -11,8 +11,10 @@ from museflow.providers import (
     DashScopeProvider,
     GenerationRequest,
     PermanentProviderError,
+    ProviderError,
     TransientProviderError,
 )
+from museflow.tasks.execution_semantics import AttemptPhase
 
 
 def _png(width: int = 1280, height: int = 1280) -> bytes:
@@ -74,15 +76,25 @@ def test_dashscope_success_submits_once_polls_and_downloads() -> None:
         )
 
     provider, client = _provider(handler)
+    remote_ids: list[str] = []
+    phases: list[AttemptPhase] = []
     try:
         result = provider.generate(
             GenerationRequest("a lighthouse", DASHSCOPE_SIZE),
             request_key="task:attempt:1",
             remote_request_id=None,
+            on_remote_request_id=remote_ids.append,
+            on_phase=phases.append,
         )
     finally:
         client.close()
     assert result.provider_request_id == "task-1"
+    assert remote_ids == ["task-1"]
+    assert phases == [
+        AttemptPhase.PROVIDER_SUBMITTING,
+        AttemptPhase.PROVIDER_RUNNING,
+        AttemptPhase.RESULT_FETCHING,
+    ]
     assert result.metadata["task_status_sequence"] == "RUNNING->SUCCEEDED"
     assert result.metadata["width"] == "1280"
     assert result.metadata["result_host_allowlisted"] == "yes"
@@ -95,7 +107,7 @@ def test_dashscope_success_submits_once_polls_and_downloads() -> None:
     ("status_code", "payload", "expected"),
     [
         (429, {"code": "Throttling.RateQuota"}, "PROVIDER_RATE_LIMITED"),
-        (500, {"code": "InternalError"}, "PROVIDER_UNAVAILABLE"),
+        (500, {"code": "InternalError"}, "PROVIDER_SUBMISSION_UNKNOWN"),
         (401, {"code": "InvalidApiKey"}, "PROVIDER_AUTHENTICATION"),
     ],
 )
@@ -105,7 +117,7 @@ def test_http_error_mapping(status_code: int, payload: dict[str, str], expected:
 
     provider, client = _provider(handler)
     try:
-        with pytest.raises((TransientProviderError, PermanentProviderError)) as error:
+        with pytest.raises(ProviderError) as error:
             provider.generate(
                 GenerationRequest("prompt", DASHSCOPE_SIZE),
                 request_key="key",
@@ -141,6 +153,43 @@ def test_timeout_is_transient_and_creation_is_not_retried() -> None:
     assert posts == 1
 
 
+def test_existing_remote_request_is_polled_without_a_second_post() -> None:
+    calls: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        if request.url.host == "dashscope-result-bj.oss-cn-beijing.aliyuncs.com":
+            return httpx.Response(
+                200, headers={"content-type": "image/png"}, content=_png()
+            )
+        assert request.method == "GET"
+        return httpx.Response(
+            200,
+            json={
+                "output": {
+                    "task_status": "SUCCEEDED",
+                    "results": [
+                        {
+                            "url": "https://dashscope-result-bj.oss-cn-beijing.aliyuncs.com/result"
+                        }
+                    ],
+                }
+            },
+        )
+
+    provider, client = _provider(handler)
+    try:
+        result = provider.generate(
+            GenerationRequest("prompt", DASHSCOPE_SIZE),
+            request_key="task:attempt:1",
+            remote_request_id="known-task-id",
+        )
+    finally:
+        client.close()
+    assert result.provider_request_id == "known-task-id"
+    assert all(request.method != "POST" for request in calls)
+
+
 def test_invalid_json_missing_task_id_and_permanent_task_failure() -> None:
     cases = [
         httpx.Response(200, content=b"not-json"),
@@ -157,21 +206,21 @@ def test_invalid_json_missing_task_id_and_permanent_task_failure() -> None:
 
     provider, client = _provider(handler)
     try:
-        with pytest.raises(PermanentProviderError) as first:
+        with pytest.raises(ProviderError) as first:
             provider.generate(
                 GenerationRequest("p", DASHSCOPE_SIZE), request_key="k", remote_request_id=None
             )
-        assert first.value.code == "PROVIDER_INVALID_RESPONSE"
+        assert first.value.code == "PROVIDER_SUBMISSION_UNKNOWN"
     finally:
         client.close()
 
     provider, client = _provider(lambda request: httpx.Response(200, json={"output": {}}))
     try:
-        with pytest.raises(PermanentProviderError) as second:
+        with pytest.raises(ProviderError) as second:
             provider.generate(
                 GenerationRequest("p", DASHSCOPE_SIZE), request_key="k", remote_request_id=None
             )
-        assert second.value.code == "PROVIDER_INVALID_RESPONSE"
+        assert second.value.code == "PROVIDER_SUBMISSION_UNKNOWN"
     finally:
         client.close()
 
@@ -360,13 +409,17 @@ def test_wan26_verified_accelerated_result_host_downloads_with_default_allowlist
     assert sum(request.method == "POST" for request in calls) == 1
 
 
-def test_network_timeout_is_transient() -> None:
+def test_network_timeout_during_create_is_unknown_and_not_retried() -> None:
+    calls = 0
+
     def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
         raise httpx.ReadTimeout("provider timeout", request=request)
 
     provider, client = _provider(handler)
     try:
-        with pytest.raises(TransientProviderError) as error:
+        with pytest.raises(ProviderError) as error:
             provider.generate(
                 GenerationRequest("prompt", DASHSCOPE_SIZE),
                 request_key="key",
@@ -374,7 +427,8 @@ def test_network_timeout_is_transient() -> None:
             )
     finally:
         client.close()
-    assert error.value.code == "PROVIDER_NETWORK_ERROR"
+    assert error.value.code == "PROVIDER_SUBMISSION_UNKNOWN"
+    assert calls == 1
 
 
 @pytest.mark.parametrize(

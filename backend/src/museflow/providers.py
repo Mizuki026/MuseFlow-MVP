@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import os
 import struct
+import threading
 import time
 import zlib
 from collections.abc import Callable
@@ -15,6 +16,7 @@ from urllib.parse import quote, urlparse
 import httpx
 
 from museflow.assets import ResultDownloadError, SecureResultDownloader
+from museflow.tasks.execution_semantics import AttemptPhase
 
 DEFAULT_DASHSCOPE_API_HOST = "https://dashscope.aliyuncs.com"
 DASHSCOPE_MODEL = "wan2.6-t2i"
@@ -29,10 +31,22 @@ class ProviderError(RuntimeError):
         *,
         retryable: bool,
         diagnostic: str | None = None,
+        submission_state_unknown: bool = False,
     ) -> None:
         super().__init__(message)
         self.code, self.retryable = code, retryable
         self.diagnostic = diagnostic
+        self.submission_state_unknown = submission_state_unknown
+
+
+class ProviderSubmissionUnknownError(ProviderError):
+    def __init__(self, message: str = "provider may have accepted the creation request") -> None:
+        super().__init__(
+            "PROVIDER_SUBMISSION_UNKNOWN",
+            message,
+            retryable=False,
+            submission_state_unknown=True,
+        )
 
 
 class TransientProviderError(ProviderError):
@@ -79,6 +93,10 @@ class GenerationResult:
     content_type: str = "image/png"
 
 
+class LeaseChecker(Protocol):
+    def require_ownership(self) -> None: ...
+
+
 class GenerationProvider(Protocol):
     def generate(
         self,
@@ -87,11 +105,14 @@ class GenerationProvider(Protocol):
         request_key: str,
         remote_request_id: str | None,
         on_remote_request_id: Callable[[str], None] | None = None,
+        on_phase: Callable[[AttemptPhase], None] | None = None,
+        lease_guard: LeaseChecker | None = None,
     ) -> GenerationResult: ...
 
 
 class MockScenario(StrEnum):
     SUCCESS = "success"
+    LONG_RUNNING_SUCCESS = "long_running_success"
     TRANSIENT_THEN_SUCCESS = "transient_then_success"
     RATE_LIMITED = "rate_limited"
     TIMEOUT = "timeout"
@@ -134,15 +155,33 @@ def _build_mock_png() -> bytes:
 class MockProvider:
     name = "mock"
     _DEMO_PNG = _build_mock_png()
+    LONG_RUNNING_DELAY_SECONDS = 4.0
 
     def __init__(
         self,
         failures: list[ProviderError] | None = None,
         *,
         scenario: MockScenario | str = MockScenario.SUCCESS,
+        execution_delay_seconds: float = 0,
+        poll_failures: list[ProviderError] | None = None,
+        result_fetch_failures: list[ProviderError] | None = None,
+        submission_unknown_once: bool = False,
     ) -> None:
         self._failures = list(failures or [])
         self._scenario = MockScenario(scenario)
+        self._execution_delay_seconds = (
+            self.LONG_RUNNING_DELAY_SECONDS
+            if execution_delay_seconds == 0 and self._scenario is MockScenario.LONG_RUNNING_SUCCESS
+            else execution_delay_seconds
+        )
+        self._poll_failures = list(poll_failures or [])
+        self._result_fetch_failures = list(result_fetch_failures or [])
+        self._submission_unknown_once = submission_unknown_once
+        self._counter_lock = threading.Lock()
+        self.create_calls = 0
+        self.recovery_calls = 0
+        self.poll_calls = 0
+        self.result_fetch_calls = 0
 
     def generate(
         self,
@@ -151,24 +190,65 @@ class MockProvider:
         request_key: str,
         remote_request_id: str | None,
         on_remote_request_id: Callable[[str], None] | None = None,
+        on_phase: Callable[[AttemptPhase], None] | None = None,
+        lease_guard: LeaseChecker | None = None,
     ) -> GenerationResult:
-        if self._failures:
-            raise self._failures.pop(0)
-        if self._scenario is MockScenario.TRANSIENT_THEN_SUCCESS:
-            if int(request_key.rsplit(":attempt:", 1)[-1]) == 1:
+        if lease_guard is not None:
+            lease_guard.require_ownership()
+        if remote_request_id is None:
+            if self._failures:
+                raise self._failures.pop(0)
+            if self._scenario is MockScenario.TRANSIENT_THEN_SUCCESS and int(
+                request_key.rsplit(":attempt:", 1)[-1]
+            ) == 1:
                 raise TransientProviderError("PROVIDER_UNAVAILABLE", "mock provider is recovering")
+            if on_phase is not None:
+                on_phase(AttemptPhase.PROVIDER_SUBMITTING)
+            if lease_guard is not None:
+                lease_guard.require_ownership()
+            with self._counter_lock:
+                self.create_calls += 1
+            if self._submission_unknown_once:
+                self._submission_unknown_once = False
+                raise ProviderSubmissionUnknownError()
+            remote_request_id = f"mock-{request_key}"
+            if on_remote_request_id is not None:
+                on_remote_request_id(remote_request_id)
+        else:
+            with self._counter_lock:
+                self.recovery_calls += 1
+        if on_phase is not None:
+            on_phase(AttemptPhase.PROVIDER_RUNNING)
         if self._scenario is MockScenario.RATE_LIMITED:
             raise TransientProviderError("PROVIDER_RATE_LIMITED", "mock provider rate limited")
         if self._scenario is MockScenario.TIMEOUT:
             raise TransientProviderError("PROVIDER_TIMEOUT", "mock provider timed out")
         if self._scenario is MockScenario.PERMANENT_FAILURE:
             raise PermanentProviderError("PROVIDER_REJECTED", "mock provider rejected request")
+        with self._counter_lock:
+            self.poll_calls += 1
+        if lease_guard is not None:
+            lease_guard.require_ownership()
+        if self._execution_delay_seconds:
+            time.sleep(self._execution_delay_seconds)
+        if lease_guard is not None:
+            lease_guard.require_ownership()
+        if self._poll_failures:
+            raise self._poll_failures.pop(0)
+        if on_phase is not None:
+            on_phase(AttemptPhase.RESULT_FETCHING)
+        with self._counter_lock:
+            self.result_fetch_calls += 1
+        if lease_guard is not None:
+            lease_guard.require_ownership()
+        if self._result_fetch_failures:
+            raise self._result_fetch_failures.pop(0)
         digest = hashlib.sha256(
             f"{request.prompt}\n{request.size_preset}\n{request_key}".encode()
         ).hexdigest()
         return GenerationResult(
             provider_name=self.name,
-            provider_request_id=remote_request_id or f"mock-{request_key}",
+            provider_request_id=remote_request_id,
             result_digest=f"mock-result-{request_key}",
             metadata={"sha256": digest, "content_type": "image/png"},
             content=self._DEMO_PNG,
@@ -225,29 +305,58 @@ class DashScopeProvider:
         request_key: str,
         remote_request_id: str | None,
         on_remote_request_id: Callable[[str], None] | None = None,
+        on_phase: Callable[[AttemptPhase], None] | None = None,
+        lease_guard: LeaseChecker | None = None,
     ) -> GenerationResult:
         del request_key
         if request.size_preset != DASHSCOPE_SIZE:
             raise PermanentProviderError("PROVIDER_INVALID_REQUEST", "unsupported image size")
+        if lease_guard is not None:
+            lease_guard.require_ownership()
         deadline = self._monotonic() + self._remaining_timeout(request)
-        task_id = remote_request_id or self._submit(request)
-        if remote_request_id is None and on_remote_request_id is not None:
-            on_remote_request_id(task_id)
-        result_url, statuses, poll_codes = self._poll(task_id, deadline)
+        if remote_request_id is None:
+            if on_phase is not None:
+                on_phase(AttemptPhase.PROVIDER_SUBMITTING)
+            if lease_guard is not None:
+                lease_guard.require_ownership()
+            task_id = self._submit(request)
+            if lease_guard is not None:
+                lease_guard.require_ownership()
+            if on_remote_request_id is not None:
+                on_remote_request_id(task_id)
+        else:
+            task_id = remote_request_id
+        if on_phase is not None:
+            on_phase(AttemptPhase.PROVIDER_RUNNING)
+        if lease_guard is not None:
+            lease_guard.require_ownership()
+        result_url, statuses, poll_codes = self._poll(
+            task_id, deadline, lease_guard=lease_guard, on_phase=on_phase
+        )
+        if lease_guard is not None:
+            lease_guard.require_ownership()
         host_diagnostic = self._downloader.diagnose_url(result_url)
         try:
             image = self._downloader.download(result_url)
         except ResultDownloadError as error:
+            if lease_guard is not None:
+                lease_guard.require_ownership()
             error_type = TransientProviderError if error.retryable else PermanentProviderError
             raise error_type(error.code, str(error)) from error
         except httpx.HTTPError as error:
+            if lease_guard is not None:
+                lease_guard.require_ownership()
             raise TransientProviderError("RESULT_DOWNLOAD_UNAVAILABLE") from error
         except ValueError as error:
+            if lease_guard is not None:
+                lease_guard.require_ownership()
             raise PermanentProviderError(
                 "RESULT_INVALID",
                 str(error),
                 diagnostic=host_diagnostic.summary,
             ) from error
+        if lease_guard is not None:
+            lease_guard.require_ownership()
         return GenerationResult(
             provider_name=self.name,
             provider_request_id=task_id,
@@ -269,20 +378,38 @@ class DashScopeProvider:
         )
 
     def _submit(self, request: GenerationRequest) -> str:
-        response = self._send(
-            "POST",
-            "/api/v1/services/aigc/image-generation/generation",
-            json={
-                "model": DASHSCOPE_MODEL,
-                "input": {"messages": [{"role": "user", "content": [{"text": request.prompt}]}]},
-                "parameters": {"n": 1, "size": DASHSCOPE_SIZE, "prompt_extend": False},
-            },
-            headers={"X-DashScope-Async": "enable"},
-        )
-        output = self._mapping(self._payload(response, "submit").get("output"))
+        try:
+            response = self._send(
+                "POST",
+                "/api/v1/services/aigc/image-generation/generation",
+                json={
+                    "model": DASHSCOPE_MODEL,
+                    "input": {
+                        "messages": [{"role": "user", "content": [{"text": request.prompt}]}]
+                    },
+                    "parameters": {"n": 1, "size": DASHSCOPE_SIZE, "prompt_extend": False},
+                },
+                headers={"X-DashScope-Async": "enable"},
+            )
+            payload = self._payload(response, "submit")
+        except TransientProviderError as error:
+            if error.code == "PROVIDER_RATE_LIMITED":
+                raise
+            raise ProviderSubmissionUnknownError() from error
+        except ProviderError as error:
+            if error.code == "PROVIDER_INVALID_RESPONSE":
+                raise ProviderSubmissionUnknownError(
+                    "provider responded without a usable task ID"
+                ) from error
+            raise
+        except Exception as error:
+            raise ProviderSubmissionUnknownError() from error
+        output = self._mapping(payload.get("output"))
         task_id: object = output.get("task_id")
         if not isinstance(task_id, str) or not task_id:
-            raise PermanentProviderError("PROVIDER_INVALID_RESPONSE", "provider task id is missing")
+            raise ProviderSubmissionUnknownError(
+                "provider accepted the request without returning a task id"
+            )
         return task_id
 
     @staticmethod
@@ -319,14 +446,25 @@ class DashScopeProvider:
                         return value
         return None
 
-    def _poll(self, task_id: str, deadline: float) -> tuple[str, list[str], list[int]]:
+    def _poll(
+        self,
+        task_id: str,
+        deadline: float,
+        *,
+        lease_guard: LeaseChecker | None = None,
+        on_phase: Callable[[AttemptPhase], None] | None = None,
+    ) -> tuple[str, list[str], list[int]]:
         statuses: list[str] = []
         codes: list[int] = []
         path = f"/api/v1/tasks/{quote(task_id, safe='')}"
         while True:
+            if lease_guard is not None:
+                lease_guard.require_ownership()
             if self._monotonic() >= deadline:
                 raise TransientProviderError("PROVIDER_POLL_TIMEOUT", "provider polling timed out")
             response = self._send("GET", path)
+            if lease_guard is not None:
+                lease_guard.require_ownership()
             codes.append(response.status_code)
             payload = self._payload(response, "poll")
             output = self._mapping(payload.get("output"))
@@ -347,8 +485,14 @@ class DashScopeProvider:
                         "PROVIDER_POLL_TIMEOUT", "provider polling timed out"
                     )
                 self._sleep(min(self._poll_interval_seconds, remaining))
+                if lease_guard is not None:
+                    lease_guard.require_ownership()
                 continue
             if status == "SUCCEEDED":
+                if on_phase is not None:
+                    on_phase(AttemptPhase.RESULT_FETCHING)
+                if lease_guard is not None:
+                    lease_guard.require_ownership()
                 result_url = self._result_url(output)
                 if result_url is None:
                     raise PermanentProviderError(

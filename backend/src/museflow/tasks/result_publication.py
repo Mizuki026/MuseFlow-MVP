@@ -33,6 +33,7 @@ def decide_result_publication(
     *,
     token_matches: bool,
     lease_active: bool,
+    deadline_active: bool = True,
     attempt_status: str,
     task_status: str,
     claim_attempt_id: UUID,
@@ -55,8 +56,9 @@ def decide_result_publication(
 
     if (
         not lease_active
+        or not deadline_active
         or attempt_status != "RUNNING"
-        or task_status in {"SUCCEEDED", "FAILED"}
+        or task_status != "RUNNING"
     ):
         return PublicationDecision.OWNERSHIP_LOST
     return PublicationDecision.PUBLISH
