@@ -393,7 +393,7 @@ describe('MuseFlow task experience', () => {
     renderRoute(`/tasks/${TASK_ID}`)
 
     const download = await screen.findByRole('link', { name: '下载结果' })
-    expect(download).toHaveAttribute('href', '/api/v1/assets/55555555-5555-4555-8555-555555555555/download')
+    expect(download).toHaveAttribute('href', '/api/v1/assets/55555555-5555-4555-8555-555555555555/download?attachment=true')
     expect(document.body.innerHTML).not.toContain('X-Amz-')
     expect(document.body.innerHTML).not.toContain('minio:9000')
   })

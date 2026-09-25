@@ -269,12 +269,20 @@ def test_historical_result_asset_still_downloads_from_its_saved_object_key() -> 
     class RecordingAssetStore:
         def __init__(self) -> None:
             self.download_keys: list[str] = []
+            self.download_dispositions: list[str | None] = []
 
         def put_result(self, **_: object) -> StoredAsset:
             raise AssertionError("the historical download route must not write an object")
 
-        def presigned_download(self, object_key: str, *, expires_seconds: int = 300) -> str:
+        def presigned_download(
+            self,
+            object_key: str,
+            *,
+            expires_seconds: int = 300,
+            content_disposition: str | None = None,
+        ) -> str:
             self.download_keys.append(object_key)
+            self.download_dispositions.append(content_disposition)
             return f"https://objects.example/{object_key}?expires={expires_seconds}"
 
         def check_ready(self) -> None:
@@ -316,7 +324,13 @@ def test_historical_result_asset_still_downloads_from_its_saved_object_key() -> 
         assert download.status_code == 307
         assert legacy_key is not None
         assert asset_store.download_keys == [legacy_key]
+        assert asset_store.download_dispositions == [None]
         assert legacy_key in download.headers["location"]
+
+        attachment = client.get(f"{download_url}?attachment=true", follow_redirects=False)
+        assert attachment.status_code == 307
+        assert asset_store.download_keys == [legacy_key, legacy_key]
+        assert asset_store.download_dispositions[-1] == 'attachment; filename="museflow-result.png"'
     finally:
         with session_factory.begin() as session:
             session.execute(

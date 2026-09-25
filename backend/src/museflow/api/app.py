@@ -383,7 +383,10 @@ def create_app(
             return _reference_asset_response(model)
 
     @app.get("/api/v1/assets/{asset_id}/download")
-    def download_asset(asset_id: UUID) -> Response:
+    def download_asset(
+        asset_id: UUID,
+        attachment: bool = Query(default=False, include_in_schema=False),
+    ) -> Response:
         with factory() as session:
             reference_asset = session.get(ReferenceAssetModel, asset_id)
             if reference_asset is None:
@@ -394,12 +397,28 @@ def create_app(
                 if task is None or task.status != TaskStatus.SUCCEEDED.value:
                     raise ApiError(409, "RESULT_NOT_READY", "result is not ready")
                 result_object_key = result_asset.object_key
+                result_content_type = result_asset.content_type
             else:
                 result_object_key = None
+                result_content_type = None
 
         if result_object_key is not None:
             try:
-                url = result_assets.presigned_download(result_object_key, expires_seconds=300)
+                if attachment:
+                    extension = {
+                        "image/png": "png",
+                        "image/jpeg": "jpg",
+                        "image/webp": "webp",
+                    }.get(result_content_type or "", "img")
+                    url = result_assets.presigned_download(
+                        result_object_key,
+                        expires_seconds=300,
+                        content_disposition=f'attachment; filename="museflow-result.{extension}"',
+                    )
+                else:
+                    url = result_assets.presigned_download(
+                        result_object_key, expires_seconds=300
+                    )
             except Exception as error:
                 raise ApiError(
                     503, "RESULT_STORE_UNAVAILABLE", "result store is not ready"

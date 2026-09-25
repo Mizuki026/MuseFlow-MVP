@@ -1,3 +1,4 @@
+import { readFile } from 'node:fs/promises'
 import { deflateSync } from 'node:zlib'
 import { expect, test, type APIRequestContext, type Page, type TestInfo } from '@playwright/test'
 
@@ -178,6 +179,17 @@ test.describe.serial('production Web UI over the real Compose stack', () => {
     expect(download.headers()['content-type']).toContain('image/png')
     await captureScreenshot(page, testInfo, 'text-detail-complete.png')
 
+    const browserDownload = page.waitForEvent('download')
+    await page.getByRole('link', { name: '下载结果' }).click()
+    const savedResult = await browserDownload
+    expect(savedResult.suggestedFilename()).toBe('museflow-result.png')
+    expect(await savedResult.failure()).toBeNull()
+    const savedPath = await savedResult.path()
+    expect(savedPath).toBeTruthy()
+    const savedBytes = await readFile(savedPath!)
+    expect(savedBytes.subarray(0, 8)).toEqual(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))
+    await expect(page.getByRole('img', { name: '生成结果预览' })).toBeVisible()
+
     await page.reload()
     await expect(page.getByRole('heading', { name: '创作已完成' })).toBeVisible()
     await page.getByRole('link', { name: '返回任务历史' }).click()
@@ -276,6 +288,17 @@ test.describe.serial('production Web UI over the real Compose stack', () => {
     expect(stableReference.headers()['content-type']).toContain('image/png')
     const anonymousBucket = await request.get(`${minioURL}/museflow-results/`)
     expect([403, 404]).toContain(anonymousBucket.status())
+
+    const browserDownload = page.waitForEvent('download')
+    await page.getByRole('link', { name: '下载结果' }).click()
+    const savedResult = await browserDownload
+    expect(savedResult.suggestedFilename()).toBe('museflow-result.png')
+    expect(await savedResult.failure()).toBeNull()
+    const savedPath = await savedResult.path()
+    expect(savedPath).toBeTruthy()
+    const savedBytes = await readFile(savedPath!)
+    expect(savedBytes.subarray(0, 8)).toEqual(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))
+    await expect(resultImage).toBeVisible()
 
     await page.getByRole('link', { name: '返回任务历史' }).click()
     await page.getByLabel('生成方式').selectOption('IMAGE_TO_IMAGE')

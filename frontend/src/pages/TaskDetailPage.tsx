@@ -142,7 +142,7 @@ export function TaskDetailPage() {
 
           <div className="action-stack">
             {task.status === 'SUCCEEDED' && resultImageUrl && (
-              <a className="button primary" href={resultImageUrl} download="museflow-result">下载结果</a>
+              <a className="button primary" href={`${resultImageUrl}?attachment=true`}>下载结果</a>
             )}
             {task.status === 'FAILED' && !task.retry_task_id && (
               <>

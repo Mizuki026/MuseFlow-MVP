@@ -85,7 +85,13 @@ class ResultAssetStore(Protocol):
         content_type: str,
     ) -> StoredAsset: ...
 
-    def presigned_download(self, object_key: str, *, expires_seconds: int = 300) -> str: ...
+    def presigned_download(
+        self,
+        object_key: str,
+        *,
+        expires_seconds: int = 300,
+        content_disposition: str | None = None,
+    ) -> str: ...
 
     def check_ready(self) -> None: ...
 
@@ -388,9 +394,21 @@ class MinioResultAssetStore:
             identity.height,
         )
 
-    def presigned_download(self, object_key: str, *, expires_seconds: int = 300) -> str:
+    def presigned_download(
+        self,
+        object_key: str,
+        *,
+        expires_seconds: int = 300,
+        content_disposition: str | None = None,
+    ) -> str:
+        response_headers: dict[str, str | list[str] | tuple[str]] | None = None
+        if content_disposition is not None:
+            response_headers = {"response-content-disposition": content_disposition}
         return self._signer.presigned_get_object(
-            self._bucket, object_key, expires=timedelta(seconds=expires_seconds)
+            self._bucket,
+            object_key,
+            expires=timedelta(seconds=expires_seconds),
+            response_headers=response_headers,
         )
 
     def check_ready(self) -> None:
@@ -407,7 +425,13 @@ class NullResultAssetStore:
     def put_result(self, **_: object) -> StoredAsset:
         raise RuntimeError("result asset store is required for persisted results")
 
-    def presigned_download(self, object_key: str, *, expires_seconds: int = 300) -> str:
+    def presigned_download(
+        self,
+        object_key: str,
+        *,
+        expires_seconds: int = 300,
+        content_disposition: str | None = None,
+    ) -> str:
         raise RuntimeError("result asset store is required for downloads")
 
     def check_ready(self) -> None:
