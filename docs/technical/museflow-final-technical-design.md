@@ -576,7 +576,7 @@ Playwright 使用 `MockProvider` 覆盖：
 
 ### 14.5 真实 Provider 验收
 
-普通测试、CI 和 Compose Demo 保持 `MockProvider`。真实图生图验收必须：
+普通测试和 CI 显式使用 `MockProvider`。交互式默认 Compose 使用 DashScope；如需无费用演示，可显式设置 `MUSEFLOW_PROVIDER=mock`。真实图生图验收必须：
 
 - 单独确认 API Key、地域、模型权限和计费上限。
 - 固定单张输入、单张输出和受控参数。

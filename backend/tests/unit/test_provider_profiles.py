@@ -44,6 +44,21 @@ def test_registry_freezes_capabilities_sizes_and_adapter_availability() -> None:
     assert image_profile.input_content_types == frozenset({"image/png", "image/jpeg", "image/webp"})
 
 
+def test_dashscope_profiles_are_default_when_provider_is_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("MUSEFLOW_PROVIDER", raising=False)
+
+    assert (
+        configured_profile(GenerationType.TEXT_TO_IMAGE).profile_id
+        == "dashscope-wan2.6-t2i-cn-beijing-v1"
+    )
+    assert (
+        configured_profile(GenerationType.IMAGE_TO_IMAGE).profile_id
+        == "dashscope-wan2.6-image-cn-beijing-edit"
+    )
+
+
 def test_mock_profile_supports_both_types_and_dashscope_rejects_i2i_before_queue(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

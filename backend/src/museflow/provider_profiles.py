@@ -100,7 +100,7 @@ def profile_for_id(profile_id: str) -> ProviderProfile | None:
 
 
 def configured_profile(generation_type: GenerationType) -> ProviderProfile:
-    provider_name = os.environ.get("MUSEFLOW_PROVIDER", "mock").lower()
+    provider_name = os.environ.get("MUSEFLOW_PROVIDER", "dashscope").lower()
     profile = _PROFILE_BY_PROVIDER_AND_TYPE.get((provider_name, generation_type))
     if profile is None:
         raise ProviderProfileUnavailableError("configured provider profile is unavailable")

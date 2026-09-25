@@ -1,10 +1,12 @@
 # MuseFlow
 
-MuseFlow 是一个面向本机和受信网络的图像生成工作流演示项目。它包含任务恢复、参考素材校验、任务历史、不可变结果和 Provider 适配器。默认 Compose 使用 `MockProvider`，不调用真实 Provider，也不需要 API Key。MuseFlow 没有用户认证或公网滥用防护，**不得直接暴露到公网**。
+MuseFlow 是一个面向本机和受信网络的图像生成工作流演示项目。它包含任务恢复、参考素材校验、任务历史、不可变结果和 Provider 适配器。默认 Compose 使用 DashScope Wan 真实 Provider，支持文生图和图生图；创建任务会调用 Provider 并可能产生费用。运行前需配置 `DASHSCOPE_API_KEY` 与获准的 `DASHSCOPE_API_HOST`。自动化测试显式使用 MockProvider，不发送真实 Provider 请求。MuseFlow 没有用户认证或公网滥用防护，**不得直接暴露到公网**。
 
 ## 一条命令启动
 
 需要 Docker Desktop 与 Docker Compose。首次构建还需要 Docker Hub、GitHub Releases 和 Go 模块代理可达；MinIO 服务端从固定的上游版本编译，首次构建可能较慢。
+
+在创建图像任务前，请确保当前 PowerShell 会话已设置 `DASHSCOPE_API_KEY` 与 `DASHSCOPE_API_HOST`。`.env.example` 可作为 Compose 插值配置模板；不要把真实密钥提交到仓库。
 
 在仓库根目录执行：
 
@@ -79,15 +81,11 @@ Pop-Location
 
 开发 UI 地址为 `http://127.0.0.1:5173/tasks/new`。前端使用 React、TypeScript、Vite、React Router、TanStack Query 和 React Hook Form；类型由 FastAPI OpenAPI 生成。
 
-## 显式启用真实 Provider
+## Provider 配置与费用
 
-默认 Compose 在 API 和 Worker 中固定使用 `MockProvider`。如已逐次取得真实调用授权，并接受 Wan Provider 的调用费用，先在当前 PowerShell 会话安全设置 `DASHSCOPE_API_KEY` 与获准的 `DASHSCOPE_API_HOST`，再明确使用覆盖文件：
+默认 Compose 在 API 和 Worker 中使用 DashScope Wan。创建文生图或图生图任务时会调用真实 Provider，可能产生费用；请仅在已配置获准工作区并准备好承担相应费用时创建任务。API Key 与 Host 从环境注入，不写入任务或日志。需要离线演示时，可在 PowerShell 会话中设置 `MUSEFLOW_PROVIDER=mock`；自动化 Compose E2E 已隔离并始终使用 MockProvider。
 
-```powershell
-docker compose -f compose.yaml -f compose.real-provider.yaml up --build
-```
-
-覆盖文件缺少这两个变量时会拒绝启动。启用后创建图像任务会访问真实 Provider 并可能产生费用；不要用它运行常规测试或 Compose UI E2E。每次实际 Provider 请求都需要单独授权。历史任务如果记录了不可用的 Provider profile，会明确失败，不会静默切换。阶段 6 的真实图生图轨迹和脱敏 JSON 见[最终技术方案阶段 6 验证记录](docs/technical/museflow-final-technical-design.md#阶段-6-验证记录)和[受控 Provider 证据](.scratch/provider-feasibility/evidence/stage6-real-e2e.json)。同时保留的真实文生图记录见[Provider 可行性报告](docs/technical/museflow-provider-feasibility.md)；账单控制台未核账，实际扣款状态未知。
+历史任务如果记录了不可用的 Provider profile，会明确失败，不会静默切换。阶段 6 的真实图生图轨迹和脱敏 JSON 见[最终技术方案阶段 6 验证记录](docs/technical/museflow-final-technical-design.md#阶段-6-验证记录)和[受控 Provider 证据](.scratch/provider-feasibility/evidence/stage6-real-e2e.json)。同时保留的真实文生图记录见[Provider 可行性报告](docs/technical/museflow-provider-feasibility.md)；账单控制台未核账，历史实际扣款状态未知。
 
 ## 验证与开发命令
 
