@@ -63,7 +63,7 @@ PostgreSQL 任务数据和私有 MinIO 对象是持久事实；Redis 只用于�
 
 同时抽查旧任务状态、旧创建请求默认类型和结果下载路径。用 `docker compose run --rm migrate` 执行迁移，再检查迁移容器的退出状态和 `alembic current`；迁移只依赖 PostgreSQL，不要求 MinIO 在线。当前迁移不提供自动 downgrade，部分历史步骤明确不可逆。失败时从备份恢复到隔离副本排查，不要在未备份的默认 Compose 数据卷上试迁移，也不要通过 downgrade 回退数据库。
 
-MinIO bucket 默认保持私有。浏览器图片使用 MuseFlow 的稳定 `/api/v1/assets/{id}/download` 路径，后端需要时再签发短期访问能力；前端不保存对象键或签名 URL。
+MinIO bucket 默认保持私有。图片预览使用 MuseFlow 的稳定 `/api/v1/assets/{id}/download` 路径；点击任务详情中的“下载结果”时，前端请求该路径的 `?attachment=true` 形式，后端签发带附件文件名的短期下载地址。浏览器按自己的下载设置将图片保存到下载目录，或在启用询问选项时提示保存位置；MuseFlow 不读取或设置浏览器的下载路径。前端不保存对象键或签名 URL。
 
 MuseFlow API 没有用户级认证、授权或限流，只适用于本机或受信网络。Compose 将所有宿主机端口限制到 `127.0.0.1`；不要把当前 Compose 直接暴露到公网。
 

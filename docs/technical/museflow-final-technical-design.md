@@ -1,18 +1,18 @@
 # MuseFlow 最终版本技术方案
 
-- 版本：v0.2
-- 状态：阶段 8 已完成（最终验收追踪、资源与运行报告、完整质量门通过；限制见验收追踪表）
-- 更新日期：2026-09-24
+- 版本：v0.3
+- 状态：最终版本已实现；本文已同步至 2026-09-26 的 Provider 默认值和结果下载行为
+- 更新日期：2026-09-26
 - 对应产品文档：[MuseFlow 最终产品设计文档](../product/museflow-product-design.md)
 - 基线方案：[MuseFlow MVP 技术方案](./museflow-mvp-technical-design.md)
 
 ## 1. 目标与背景
 
-MuseFlow 已完成可靠文生图 MVP。本方案定义从 MVP 演进到最终作品集版本的技术路径，核心增量是一个可信的图生图纵向切片，以及对功能、可靠性和性能声明的证据化收尾。
+MuseFlow 已完成可靠文生图 MVP 和最终作品集版本。本方案记录最终版的架构、接口、状态与运行边界；相对 MVP 的主要增量是可信的图生图纵向切片，以及对功能和可靠性声明的证据化验收。
 
-本阶段不重写 MVP，也不通过堆叠基础设施展示技术栈。现有 PostgreSQL outbox、独立 Scheduler、Redis、Celery Worker、attempt、lease、fencing、MinIO、Provider Adapter 和前端查询链路继续作为执行基线。新增能力必须复用这些可靠性机制，但“复用”不意味着保留已经发现的缺口：固定结果对象键无法被数据库 fencing 保护，固定 lease 也无法覆盖新增的图生图 I/O，因此必须先完成可靠性加固。
+本文对应的最终版本已经实现，不再是待执行的实施计划。本项目不重写 MVP，也不通过堆叠基础设施展示技术栈。现有 PostgreSQL outbox、独立 Scheduler、Redis、Celery Worker、attempt、lease、fencing、MinIO、Provider Adapter 和前端查询链路继续作为执行基线；阶段性实施记录保留在后文，当前行为以代码和验收追踪表为准。
 
-本阶段属于阶段性产品收尾，而非长期商业平台建设。方案优先考虑：
+最终版本属于阶段性产品收尾，而非长期商业平台建设。实现遵循以下约束：
 
 - 图生图与文生图共享统一任务语义，同时保持输入能力约束清晰。
 - 参考图片从上传、校验、私有存储到任务引用形成完整可信链路。
@@ -360,6 +360,8 @@ Provider 接口只接收 `ProviderGenerationRequest`。图生图请求包含 `Ve
 
 任务冻结 profile 标识而不保存凭据。Worker 必须按冻结 profile 执行；profile 不存在或配置不可用时返回稳定配置错误，不能自动切换 Provider。
 
+当前 Compose 通过 `MUSEFLOW_PROVIDER=dashscope` 选择真实 DashScope Adapter。文生图使用 profile `dashscope-wan2.6-t2i-cn-beijing-v1` / 模型 `wan2.6-t2i`，图生图使用 profile `dashscope-wan2.6-image-cn-beijing-edit` / 模型 `wan2.6-image`。凭据和允许的 API Host 由 `DASHSCOPE_API_KEY`、`DASHSCOPE_API_HOST` 注入；自动化测试显式设置 `MUSEFLOW_PROVIDER=mock`。
+
 ### 9.2 DashScope Adapter
 
 - 文生图继续使用已经验收的 `wan2.6-t2i` 协议。
@@ -369,7 +371,7 @@ Provider 接口只接收 `ProviderGenerationRequest`。图生图请求包含 `Ve
 - 创建请求不在 Adapter 内自动重发；平台 attempt 和现有 retry 策略继续拥有重试决定。
 - Adapter 在提交前、轮询间隔和结果下载前检查 `LeaseGuard`。失去 ownership 后尽快停止本地工作；已发出的外部请求仍保留 exactly-once 降级语义。
 
-真实图生图 Provider 阶段 0 已于 2026-09-24 完成一次单独授权的成功探针，结论为 `CONDITIONAL GO`。能力矩阵、脱敏证据和冻结限制见[阶段 0 报告](museflow-provider-feasibility.md)。可以按冻结契约继续实现；生产 SafeArtifactFetcher 的 DNS 连接绑定、单 attempt 单创建和 body 未验证上界等上线条件仍必须落实。
+真实图生图 Provider 阶段 0 于 2026-09-24 完成一次单独授权的成功探针，结论为 `CONDITIONAL GO`。能力矩阵、脱敏证据和冻结限制见[阶段 0 报告](museflow-provider-feasibility.md)。随后阶段 6 落实了 SafeArtifactFetcher 的 DNS 连接绑定、单 attempt 单创建及请求体本地上界检查；已实现的结果获取边界见本节上文。Provider 没有承诺接受 MuseFlow 的本地 JSON body 上限。
 
 ### 9.3 MockProvider
 
@@ -468,7 +470,7 @@ Provider 调用和对象存储 I/O 期间不得持有数据库行锁或长事务
 | --- | --- | --- |
 | `POST` | `/assets/references` | 使用上传幂等键上传并校验单张参考图片 |
 | `GET` | `/assets/{asset_id}` | 查询参考素材元数据 |
-| `GET` | `/assets/{asset_id}/download` | 获取稳定的受控预览或下载入口 |
+| `GET` | `/assets/{asset_id}/download` | 默认获取稳定预览入口；`?attachment=true` 返回带附件文件名的短期签名下载入口（该查询参数不公开在 OpenAPI） |
 | `POST` | `/tasks` | 增加生成类型和可选参考素材 ID |
 | `GET` | `/tasks` | 增加生成类型筛选，保留稳定 cursor |
 | `GET` | `/tasks/{task_id}` | 返回输入摘要、参考素材和重试链 |
@@ -494,7 +496,8 @@ Provider 调用和对象存储 I/O 期间不得持有数据库行锁或长事务
 ### 12.2 任务详情
 
 - 展示生成类型、参考图片、规范化尺寸、attempt、时间线和重试链。
-- 参考图片和结果都使用 MuseFlow 稳定路径，不缓存 MinIO 签名 URL。
+- 参考图片和结果预览都使用 MuseFlow 稳定路径，不缓存 MinIO 签名 URL。
+- “下载结果”请求结果路径的 `?attachment=true` 形式；后端对签名对象响应设置 `Content-Disposition: attachment` 与 `museflow-result` 文件名。浏览器按用户的下载目录设置保存，或按“下载前询问”设置提示路径；MuseFlow 不读取或指定浏览器下载目录。
 - 继续只轮询非终态任务。
 
 ### 12.3 任务历史
@@ -644,7 +647,7 @@ Playwright 使用 `MockProvider` 覆盖：
 
 每个阶段必须形成独立、已验证且可回滚的逻辑提交；不得把可靠性修复、迁移、上传、Provider 和前端压入一个大型提交。
 
-### 阶段 0：真实图生图 Provider 门禁
+### 阶段 0：真实图生图 Provider 门禁（已完成）
 
 - 核对官方地域、权限、模型、费用、输入限制、Base64 上限、异步协议、结果主机和幂等边界。
 - 在逐次授权和费用上限内执行一次单参考图成功探针。
@@ -652,7 +655,7 @@ Playwright 使用 `MockProvider` 覆盖：
 
 验收：成功路径和能力矩阵有脱敏记录。阶段 0 已获 `CONDITIONAL GO`；继续实施须遵守 Provider profile 与报告列明的部署前置条件。若实际部署触碰未保证的协议边界或安全条件不成立，停止并重新选型或缩减承诺。
 
-### 阶段 1：不可变结果与 fencing
+### 阶段 1：不可变结果与 fencing（已完成）
 
 - 把固定结果对象键改为内容寻址候选。
 - 由数据库 execution token 事务发布唯一权威结果。
@@ -669,7 +672,7 @@ Playwright 使用 `MockProvider` 覆盖：
 - 不新增 migration 或候选表。旧 `result_assets.object_key` 由现有详情/下载路径读取，因此历史 `.../0.png` 对象无需搬迁。非权威候选清理由后续隔离维护任务负责。
 - 本窗口未实施 Lease heartbeat；lease heartbeat、稳定执行阶段和错误责任域属于阶段 2。
 
-### 阶段 2：Lease heartbeat 与执行语义
+### 阶段 2：Lease heartbeat 与执行语义（已完成）
 
 - 实现 `LeaseGuard`、稳定 attempt phase 和错误责任域。
 - 明确同 attempt 恢复与新 Provider attempt 的分界。
@@ -687,7 +690,7 @@ Playwright 使用 `MockProvider` 覆盖：
 - 真实 Redis/Worker/Scheduler 长任务测试在 lease 1.2 秒、heartbeat 0.2 秒时成功跨过原 lease：单 attempt、无 `ATTEMPT_RECLAIMED`、最终 `COMPLETED`。PostgreSQL 集成覆盖 token 失效、deadline、数据库 heartbeat 故障、接管与恢复；MinIO 回归覆盖旧/新 Worker 交错和发布事务故障恢复。
 - 验证结果与对应提交记录见第 21 节。
 
-### 阶段 3：兼容数据迁移
+### 阶段 3：兼容数据迁移（已完成）
 
 - 新建 `reference_assets`，扩展 `result_assets` 与 `generation_tasks`。
 - 回填既有任务类型和 Provider profile。
@@ -707,7 +710,7 @@ Playwright 使用 `MockProvider` 覆盖：
 - 空库、历史 fixture、约束迁移测试 `3 passed`；真实 Redis/Worker 长任务测试单独 `1 passed`。启用 MinIO、结果发布和 Compose Worker→私有 MinIO 下载端到端门禁后，完整后端套件 `130 passed, 1 skipped, 2 warnings`。Ruff、Pyright、compileall、Alembic check、Compose 配置和 diff 检查通过。完整命令与隔离方式见第 21 节。
 - 代码提交：`27427fb`（`feat: 增加兼容任务快照与参考素材迁移`）。阶段 3 文档提交和最终工作区状态见交付报告。
 
-### 阶段 4：参考素材纵向切片
+### 阶段 4：参考素材纵向切片（已完成）
 
 - 加入 `python-multipart` 和 Pillow。
 - 实现上传幂等、三层大小限制、完整校验、MinIO 私有存储和稳定预览。
@@ -739,7 +742,7 @@ Playwright 使用 `MockProvider` 覆盖：
 
 验收：真实隔离 PostgreSQL、Redis、MinIO、Scheduler、generation Worker 和 maintenance Worker 均运行；Mock 图生图上传 API 到权威结果及访问路径通过。临时/永久 Provider 故障、reference 读取暂时失败、缺失/篡改对象、remote ID 同 attempt 恢复、fencing、手动重试、历史筛选及文生图回归通过。
 
-### 阶段 6：正式图生图 Adapter
+### 阶段 6：正式图生图 Adapter（已完成）
 
 - 已实现按阶段 0 冻结 profile 注册的 `wan2.6-image` Adapter，以及独立 `SafeArtifactFetcher`。
 - Adapter 只提交一次创建请求；成功后立即持久化远端 task ID；已知 ID 恢复时只查询原任务。5xx 和 POST 响应不确定均不会安全地自动创建重试。
@@ -748,19 +751,22 @@ Playwright 使用 `MockProvider` 覆盖：
 - 经单次授权完成真实系统 E2E：创建 POST 一次且 HTTP 200，两次同 task 查询均 HTTP 200，状态 `RUNNING → SUCCEEDED`；attempt 数 1，无恢复或重发。
 - 真实输出与数据库/MinIO 摘要核对、匿名访问拒绝及 MuseFlow 短期访问验证通过；脱敏记录见 [stage6-real-e2e.json](../../.scratch/provider-feasibility/evidence/stage6-real-e2e.json)。
 
-阶段状态：已完成。代码、模拟及真实全链路、数据库/MinIO 摘要核对、访问控制验证、脱敏记录和回归均已完成。阶段 7 可按项目计划另行启动。
+阶段状态：已完成。代码、模拟及真实全链路、数据库/MinIO 摘要核对、访问控制验证、脱敏记录和回归均已完成；随后进入阶段 7，阶段 0 至阶段 8 现均已完成。
 
-### 阶段 7：前端与 Compose
+### 阶段 7：前端与 Compose（已完成）
+
+以下 Compose Provider 配置和测试结果记录的是阶段 7 原始交付状态。2026-09-25 的最终配置变更已将默认 Provider 切换为真实 DashScope；当前行为见本方案第 9.2 节和 README。
 
 - 已实现生成类型选择、参考图片本地预览与幂等上传、服务端校验反馈、任务详情/attempt/错误时间线/重试链，以及类型和状态组合筛选、cursor 分页与已加载提示词搜索。
-- 前端只持久化恢复创建意图所需的提示词、生成类型、幂等键与 READY 素材 ID；原始图片和对象 URL 不写入浏览器持久化。下载通过稳定 MuseFlow 路径，不向浏览器暴露 MinIO 对象键或签名 URL。
+- 前端只持久化恢复创建意图所需的提示词、生成类型、幂等键与 READY 素材 ID；原始图片和对象 URL 不写入浏览器持久化。预览通过稳定 MuseFlow 路径，不向浏览器暴露 MinIO 对象键或签名 URL。
 - 从既有 OpenAPI 生成的类型驱动图生图请求，Vitest 覆盖创建幂等、素材选择状态、恢复、过滤和详情边界；Playwright 通过生产静态 Web 容器和真实 API/私有 MinIO 验证主要 UI 流程。
-- 增加 Node 多阶段构建、Nginx 静态 Web 与 `/api/` 反向代理；Compose 统一启动 migrate、bucket 初始化、Web、API、Scheduler、generation Worker、maintenance Worker、PostgreSQL、Redis 与 MinIO。所有宿主机端口默认仅绑定 loopback，默认固定 MockProvider。
-- 增加显式真实 Provider Compose override；真实 Provider 不会由默认启动或测试流程调用。
+- 增加 Node 多阶段构建、Nginx 静态 Web 与 `/api/` 反向代理；Compose 统一启动 migrate、bucket 初始化、Web、API、Scheduler、generation Worker、maintenance Worker、PostgreSQL、Redis 与 MinIO。所有宿主机端口默认仅绑定 loopback。阶段 7 原始配置默认固定 MockProvider，真实 Provider 使用显式 Compose override。
+- 阶段 7 原始下载按钮使用稳定路径和 HTML `download` 属性；2026-09-25 修复后，按钮改用 `?attachment=true`，由后端设置签名对象响应的附件文件名并触发浏览器下载。详情图片预览继续使用稳定路径。
+- 2026-09-25 的 Provider 默认值变更移除了显式真实 Provider override 的前置要求：当前 Compose 默认使用 DashScope；显式设置 `MUSEFLOW_PROVIDER=mock` 用于离线演示，自动化 Compose E2E 仍固定使用 MockProvider。
 
 验收结果：完整隔离 Compose 栈启动成功；Playwright `6 passed`；完整后端回归 `292 passed, 10 skipped`；隔离数据库迁移到 `0007_reference_operation_leases` 且 `alembic check` 无新操作；Web 容器重启后数据库任务与 MinIO 结果仍可读取。详见第 21 节。
 
-### 阶段 8：证据化收尾
+### 阶段 8：证据化收尾（已完成）
 
 - 完善结构化日志、资源预算、数据报告和演示脚本。
 - 完成 README、架构图、验收追踪表和对外声明复核。
@@ -807,24 +813,17 @@ Playwright 使用 `MockProvider` 覆盖：
 - 验收追踪表将最终产品标准逐项映射到当前 commit 的证据。
 - 只有公开性能数字时才要求固定环境、固定场景、原始结果和对应 commit。
 
-## 20. 当前进度与下一步
+## 20. 最终实现状态与运行边界
 
-当前已完成：
+最终产品范围已经实现：文生图与单参考图图生图共用任务生命周期；包括参考图校验和私有存储、异步执行与恢复、任务历史和手动重试、稳定预览路径及浏览器附件下载。阶段 0 至阶段 8 的具体实现记录保留在前文，自动化、受控真实 Provider 与人工验收证据汇总在[最终发布验收追踪表](./museflow-final-acceptance.md)。
 
-- 可靠文生图 MVP 及其发布验收。
-- PostgreSQL outbox、Scheduler、Redis、Celery、attempt、lease 和 fencing。
-- 真实文生图 Provider、`MockProvider`、安全结果下载和私有 MinIO。
-- 创建、详情、历史三个正式前端页面及 OpenAPI 类型生成。
-- 阶段 7：完成正式文生图/图生图前端、生产静态 Web 容器、统一 `/api` 代理、完整 Mock Compose E2E 与重启持久化验证。
-- MVP 单元、集成、故障恢复和端到端测试。
-- 阶段 2：执行 lease heartbeat、稳定 attempt phase、ownership/deadline fail-closed 和同 attempt 恢复语义。
-- 阶段 3：兼容 schema、历史任务确定性 backfill、Provider/policy 快照与旧 API/数据读取验证。
+当前 Compose 默认选择 DashScope 真实 Provider：文生图和图生图按冻结 profile 分别调用 `wan2.6-t2i` 与 `wan2.6-image`。启动前必须配置获准的 `DASHSCOPE_API_KEY` 和 `DASHSCOPE_API_HOST`；任务创建会发起真实请求并可能产生费用。离线演示可设置 `MUSEFLOW_PROVIDER=mock`，自动化测试和 Compose E2E 使用 MockProvider。
 
-阶段 0 已完成并得出 `CONDITIONAL GO`；阶段 1 的不可变候选和数据库权威结果 fencing 已完成；阶段 2 的 heartbeat、稳定 phase、失败责任域和恢复边界已实现并通过验证；阶段 3 的兼容 schema、确定性 backfill 与旧 API/数据读取验证已完成。
+结果预览使用稳定的 MuseFlow 路径。“下载结果”通过 `?attachment=true` 请求附件响应，由后端签发带 `Content-Disposition: attachment` 文件名的短期对象 URL；最终下载目录由浏览器设置决定。私有存储、历史兼容和无认证边界保持不变。
 
-阶段 4 已完成参考图片上传、私有存储、稳定访问、恢复和显式维护删除；阶段 5 已完成图生图领域、冻结参考输入、Mock 执行、手动重试、历史筛选及真实后端链路验收。阶段 6 已实现正式 `wan2.6-image` Adapter 和 `SafeArtifactFetcher`，模拟 Provider 全链路、单次真实 Provider E2E 及阶段 1 至阶段 5 回归均通过。阶段 7 已完成前端与静态 Compose 交付和 Mock 全栈 E2E。阶段 8 已完成 P-01 至 P-18 证据追踪、资源与运行报告、README/演示复核和本地完整验收。历史结果宽高仍 nullable，回填继续由独立数据收尾流程处理。默认 Compose 数据库未应用迁移；本阶段只迁移并清理隔离测试项目。任何实际部署都必须先备份目标数据库，再升级到 `0007_reference_operation_leases` 并核对迁移后数据量。
+当前 Alembic head 为 `0007_reference_operation_leases`。最终验证使用隔离数据库和 Compose 项目，没有在默认 `museflow` 数据库上执行迁移；实际部署前必须备份目标数据库、升级并核对数据量。历史结果宽高继续允许 nullable。项目仍不提供用户认证、授权、限流或公网费用保护；未测量真实 RSS、性能负载或 GitHub-hosted Actions，也未核查历史 Provider 账单。
 
-产品与架构决策已经在 2026-09-24 的审查中收敛。每次真实图生图请求仍需要单独确认账号、地域、费用、请求参数和单次授权；文档结论本身不构成付费调用授权。
+2026-09-25 的 Provider 默认值和浏览器下载修复已经合入；相关追加验证见第 21 节。阶段 0 的 `CONDITIONAL GO` 与历史真实 Provider 请求记录只证明相应受控调用成功，不保证未来账号可用性或账单金额；每次实际部署仍需自行确认凭据、地域、费用与网络条件。
 
 ## 21. 验证记录
 
@@ -921,6 +920,14 @@ Playwright 使用 `MockProvider` 覆盖：
 - 单独的 PostgreSQL-only 隔离项目执行空库与测试库 migration；没有启动 MinIO。迁移历史 fixture 通过 `test_stage_two_history_is_preserved_and_backfilled_deterministically` 覆盖旧数据回填。E2E 停止并重启隔离 Compose 后，完成任务和私有 MinIO 结果仍可访问；脚本随后仅移除了该隔离项目的容器、网络和卷。默认 `museflow` Compose 项目和数据卷未接触。
 - README、产品 P-01 至 P-18、Mock demo、结构化日志/任务报告字段及资源限制已人工对照代码与命令输出；没有在文档中记录提示词或凭证。已存在的真实 Provider 文生图/图生图证据可追溯，本阶段没有重跑收费 Provider；账单状态未知。没有公开性能承诺，未运行 Locust；实际 RSS 与 GitHub-hosted Actions 尚未测量/触发。
 - 最终验收追踪表：[museflow-final-acceptance.md](./museflow-final-acceptance.md)。阶段 8 实现与验证提交：`33986b5f6af673e89ed69a631af7f1bf2eb60352`；文档提交与最终 Git 状态由交付记录列出。
+
+### 2026-09-25 至 2026-09-26 最终行为更新验证
+
+- Provider 默认配置从 MockProvider 切换到 DashScope，离线演示仍可显式选择 MockProvider；Compose 自动化测试固定使用 MockProvider。本次没有发起新的真实 Provider 请求，也没有核验账单。
+- 结果下载修复：详情页按钮请求 `?attachment=true`，API 测试确认该分支设置附件 `Content-Disposition`，原稳定预览路径仍保留 inline 响应。文生图和图生图 Playwright 流程各运行 1 次通过，均验证建议文件名 `museflow-result.png`、下载无失败、文件具有 PNG 签名，且结果预览仍显示。
+- 使用隔离 Compose 的 `npm run test:e2e:compose -- --grep "creates text-to-image" --skip-restart --backend-check` 完成文生图 UI 流程和后端检查；该次后端结果为 `298 passed, 10 skipped, 2 warnings`。10 项 gated 服务测试没有在该次调用中重跑；其分别通过的记录仍见阶段 8 总体验证。图生图 UI 下载流程另行定向运行并通过。
+- 前端 `npm run check:api-generated`、`npm run typecheck`、`npm run lint`、Vitest（`19 passed`）及受影响的后端 Ruff/Pyright 检查通过。结果下载查询参数不加入 OpenAPI，因此生成 API 类型无变化。
+- 修复提交：`f710b2e`（`fix: 修复结果下载未保存`）；默认 Provider 切换提交：`9374c6d`（`fix: 默认使用 DashScope 真实生成`）。
 
 ## 22. 参考资料
 

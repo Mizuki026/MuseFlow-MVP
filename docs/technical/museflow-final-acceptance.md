@@ -1,13 +1,13 @@
 # MuseFlow 最终发布验收追踪
 
-- 验收日期：2026-09-24
-- 当前验证提交：`33986b5f6af673e89ed69a631af7f1bf2eb60352`（阶段 8 实现与验证）。P-01 至 P-12、P-14 至 P-18 均针对该提交的代码与证据；P-13 另外引用文生图提交 `2636c4e57e8254347222338ec89fc013ab6b5b11` 和图生图提交 `d9e1809fe14bad85e3d19c13c82b3c494a4096cf`。
+- 验收更新日期：2026-09-26
+- 当前实现验证基线：`f710b2e9423203c201b0352c055cc0ddec872c96`（结果下载修复）；Provider 默认值切换提交为 `9374c6d`。下文原阶段 8 记录仍对应 `33986b5f6af673e89ed69a631af7f1bf2eb60352`；本页末尾补充了后续两项变更的验证结果。P-13 另外引用文生图提交 `2636c4e57e8254347222338ec89fc013ab6b5b11` 和图生图提交 `d9e1809fe14bad85e3d19c13c82b3c494a4096cf`。
 - 验收结论：本地验收通过；限制见各条与“总体限制”。
 - 当前范围：最终产品设计 P-01 至 P-18、README、演示步骤、迁移、资源边界、日志/报告和发布门禁。
 
 ## 总体验证结果
 
-完整门禁运行从 `frontend` 目录执行 `npm run test:e2e:compose -- --backend-check --full-backend-gates`。脚本使用独立 Compose project、宿主机端口、数据库和对象存储卷及 MockProvider；完整前后端健康，Chromium Playwright `6 passed`，独立数据库升级至 `0007_reference_operation_leases`，`alembic check` 输出 `No new upgrade operations detected`，后端 `296 passed, 10 skipped, 2 warnings`。10 项 gated 服务测试随后全部单独运行通过：Compose worker/Redis/MinIO/maintenance `6 passed`、模拟 DashScope `1 passed`、结果发布 `3 passed`；栈停止/重启持久化检查通过。之后只增加了已实现 Mock timeout 的单元表征测试并整理门禁脚本格式；最终工作树运行 `npm run test:e2e:compose -- --backend-check --skip-restart` 得到 Playwright `6 passed`、后端 `297 passed, 10 skipped, 2 warnings`，当前完整 unit suite 为 `220 passed`。最终树的 297 个后端用例与此前 10 个 gated 用例均已通过，共 307 个用例；两条弃用警告来自 Starlette/httpx TestClient 与 AnyIO。
+阶段 8 的完整门禁运行从 `frontend` 目录执行 `npm run test:e2e:compose -- --backend-check --full-backend-gates`。脚本使用独立 Compose project、宿主机端口、数据库和对象存储卷及 MockProvider；完整前后端健康，Chromium Playwright `6 passed`，独立数据库升级至 `0007_reference_operation_leases`，`alembic check` 输出 `No new upgrade operations detected`，后端 `296 passed, 10 skipped, 2 warnings`。10 项 gated 服务测试随后全部单独运行通过：Compose worker/Redis/MinIO/maintenance `6 passed`、模拟 DashScope `1 passed`、结果发布 `3 passed`；栈停止/重启持久化检查通过。之后阶段 8 最终工作树运行 `npm run test:e2e:compose -- --backend-check --skip-restart` 得到 Playwright `6 passed`、后端 `297 passed, 10 skipped, 2 warnings`，当时 unit suite 为 `220 passed`。2026-09-25 至 26 下载修复后的追加检查见下文；两条既有弃用警告来自 Starlette/httpx TestClient 与 AnyIO。
 
 阶段 8 代码检查命令：
 
@@ -33,9 +33,9 @@ uv run --directory backend python -m compileall -q src tests migrations
 ## P-02：正式前端完成文生图与图生图
 
 - **实现**：`frontend/src` 创建、详情、历史页面；`backend/src/museflow` 共享任务执行路径。
-- **精确 E2E**：`creates text-to-image from the static frontend, shows the result and history, and survives refresh`；`uploads one real image, creates image-to-image, filters it in history, and keeps MinIO private`。
-- **命令与结果**：阶段 8 隔离全栈命令中 Chromium `6 passed`。正式前端静态容器通过真实 Compose API 代理连接 PostgreSQL、Worker 和 MinIO。
-- **状态/限制**：通过。界面流程使用 MockProvider；真实 Provider 证据见 P-13。
+- **精确 E2E**：`creates text-to-image from the static frontend, shows the result and history, and survives refresh`；`uploads one real image, creates image-to-image, filters it in history, and keeps MinIO private`。两条流程均点击“下载结果”，断言浏览器下载事件、建议文件名、PNG 签名和预览仍可见。
+- **命令与结果**：阶段 8 隔离全栈命令中 Chromium `6 passed`；2026-09-25 至 26 两种生成流程的下载 E2E 各 `1 passed`。正式前端静态容器通过真实 Compose API 代理连接 PostgreSQL、Worker 和 MinIO。
+- **状态/限制**：通过。UI/自动化 Compose 流程使用 MockProvider；默认 Compose 已切换为 DashScope，真实 Provider 受控证据见 P-13。浏览器下载目录由浏览器设置控制。
 
 ## P-03：参考图片输入安全校验
 
@@ -96,8 +96,8 @@ uv run --directory backend python -m compileall -q src tests migrations
 ## P-11：私有对象存储与认证边界
 
 - **实现**：`compose.yaml` bucket 初始化强制 private；API 短期签名下载；`README.md` 明确无用户认证、仅供本机或受信网络。
-- **精确测试/记录**：`tests/integration/test_reference_asset_minio.py::test_reference_asset_upload_is_private_and_verified_through_api`；`tests/integration/test_real_compose_mock_e2e.py::test_compose_mock_result_reaches_private_minio_and_signed_download`；stage 6 真实结果匿名访问 403、签名访问成功。
-- **命令与结果**：隔离 MinIO/Compose gates 通过；Playwright 验证 MinIO 私有与稳定 MuseFlow 路径；历史真实 Provider 记录包含匿名拒绝。
+- **精确测试/记录**：`tests/integration/test_reference_asset_minio.py::test_reference_asset_upload_is_private_and_verified_through_api`；`tests/integration/test_real_compose_mock_e2e.py::test_compose_mock_result_reaches_private_minio_and_signed_download`；`tests/api/test_tasks_api.py::test_historical_result_asset_still_downloads_from_its_saved_object_key` 覆盖预览路径和 `attachment=true` 的响应头；stage 6 真实结果匿名访问 403、签名访问成功。
+- **命令与结果**：隔离 MinIO/Compose gates 通过；Playwright 验证 MinIO 私有、稳定 MuseFlow 路径和浏览器附件下载；历史真实 Provider 记录包含匿名拒绝。
 - **状态/限制**：通过。MuseFlow API 本身没有用户级认证、授权或公网滥用防护，禁止直接暴露公网。
 
 ## P-12：Provider profile 冻结
@@ -131,21 +131,28 @@ uv run --directory backend python -m compileall -q src tests migrations
 ## P-16：工程质量门
 
 - **实现**：`.github/workflows/ci.yml` 在 push、pull request 和手动触发时执行后端 Ruff/Pyright/compileall、前端生成类型/类型检查/lint/unit/build、Compose config 与完整隔离 Compose E2E。
-- **精确命令与结果**：后端 `ruff check .`、Pyright `0 errors`、compileall 通过；前端生成类型、typecheck、lint、Vitest `19 passed`、build 通过；full-gate Compose 运行 Playwright `6 passed`、后端 `296 passed + 10 gated skipped`，另将 10 个 gated 用例分别实际运行且全部通过。之后最终树执行 `--backend-check --skip-restart`，Playwright `6 passed`、后端 `297 passed + 10 gated skipped`。`ci.yml` 由 `js-yaml` 成功解析。迁移检查通过。
-- **状态/限制**：本机所有质量门通过；GitHub-hosted Actions 尚未因本地提交而触发，远端运行状态未验证。两条既有弃用警告没有被隐藏或改称为失败。
+- **精确命令与结果**：阶段 8 的后端 `ruff check .`、Pyright `0 errors`、compileall 通过；前端生成类型、typecheck、lint、Vitest `19 passed`、build 通过；full-gate Compose 运行 Playwright `6 passed`、后端 `296 passed + 10 gated skipped`，另将 10 个 gated 用例分别实际运行且全部通过。阶段 8 最终树执行 `--backend-check --skip-restart`，Playwright `6 passed`、后端 `297 passed + 10 gated skipped`。2026-09-25 至 26 的追加验证在隔离 Compose 中得后端 `298 passed, 10 skipped, 2 warnings`；本次没有重跑 10 个 gated 用例。前端生成类型、typecheck、lint 和 Vitest `19 passed` 通过。`ci.yml` 由 `js-yaml` 成功解析，迁移检查通过。
+- **状态/限制**：相关本地检查通过；阶段 8 的完整质量门仍有历史记录，最近下载修复后的记录是定向 E2E 和完整非-gated后端套件，并非重新执行所有 service gates。GitHub-hosted Actions 尚未因这些本地提交而触发，远端运行状态未验证。两条既有弃用警告没有被隐藏或改称为失败。
 
 ## P-17：README 可复现性
 
-- **人工检查**：`README.md` 覆盖一条启动命令、入口、服务检查、资源边界、只读报告、数据库备份和升级、私有存储、真实 Provider 明确启用、验证命令、无认证边界及已知限制；`demo/README.md` 给出 Mock 端到端演示流程。
-- **自动证据**：README 声明的 `docker compose config --quiet` 与完整隔离 Compose E2E 均通过；验证脚本的语法检查通过。数据库迁移步骤在隔离 PostgreSQL 项目中实测，默认数据卷未接触。本地 Vite 开发命令返回 HTTP 200，`/tasks/new` 路由正常。
+- **人工检查**：`README.md` 覆盖一条启动命令、入口、服务检查、资源边界、只读报告、数据库备份和升级、私有存储、DashScope 默认启用、浏览器下载行为、无认证边界及已知限制；`demo/README.md` 给出 Mock 端到端演示流程。
+- **自动证据**：README 声明的 `docker compose config --quiet` 与完整隔离 Compose E2E 均通过；下载修复后的 Chromium 流程验证浏览器接收文件。数据库迁移步骤在隔离 PostgreSQL 项目中实测，默认数据卷未接触。本地 Vite 开发命令返回 HTTP 200，`/tasks/new` 路由正常。
 - **状态/限制**：通过。首次启动需要 Docker 和镜像仓库连通；Chromium E2E 另需安装 Playwright Chromium。
 
 ## P-18：对外声明与实施证据一致
 
-- **人工核对**：产品设计 P-01 至 P-18 均链接本追踪表；README 只宣称已实现的图生图、资源上限、重试和本机安全边界。未发布吞吐量、并发量或 P95 数字；没有 Locust 结果就不作性能保证。
+- **人工核对**：产品设计 P-01 至 P-18 均链接本追踪表；README 的 DashScope 默认值、图生图、结果下载、资源上限、重试和本机安全边界已对照代码。未发布吞吐量、并发量或 P95 数字；没有 Locust 结果就不作性能保证。
 - **实施证据**：`backend/src/museflow/safe_logging.py` 仅写固定字段并对远端请求 ID 做 12 位 SHA-256 摘要；`backend/src/museflow/task_report.py` 只读、限时窗/条数，报告阶段/队列/端到端观察延迟及重试恢复，不输出提示词、对象键、URL、远端 ID 或正文。单元测试 `tests/unit/test_safe_logging.py::test_task_event_logs_fixed_fields_and_only_remote_id_digest` 与 `tests/unit/test_task_report.py::test_task_report_calculates_phase_timings_and_retry_recovery_without_private_fields` 通过。
 - **资源口径**：Worker concurrency 1、Compose memory limit 1 GiB、单 attempt 128 MiB 是配置/容量预算；没有采集实际进程峰值 RSS，不声称为实测内存结果。task report 的百分位只描述所选数据库样本窗，不是服务等级或性能承诺。
 - **状态/限制**：通过。账单状态、实际峰值内存和 GitHub-hosted CI 尚未核验，均未写成已确认事实。
+
+## 2026-09-25 至 2026-09-26 追加验证
+
+- **Provider 默认值**：`9374c6d` 将 Compose/API/Worker 默认 Provider 切换为 DashScope；离线演示可显式设为 MockProvider，自动化 E2E 仍显式使用 Mock。本次没有发起新的真实 Provider 请求，账单状态未核验。
+- **浏览器下载**：`f710b2e` 增加 `?attachment=true` 附件响应。文生图与图生图 Chromium 流程各 `1 passed`，均确认建议文件名 `museflow-result.png`、下载无失败、内容为 PNG 且详情预览仍可见。API 测试同时确认原稳定预览路径保持兼容。
+- **后端与前端检查**：隔离 Compose 命令 `npm run test:e2e:compose -- --grep "creates text-to-image" --skip-restart --backend-check` 的后端结果为 `298 passed, 10 skipped, 2 warnings`；被跳过的 10 个服务门禁已在阶段 8 记录中分别运行通过，但本次没有重跑。前端 `npm run check:api-generated`、`npm run typecheck`、`npm run lint` 和 Vitest `19 passed` 通过；受影响后端 Ruff/Pyright 检查通过。
+- **范围与限制**：没有重跑完整 `--full-backend-gates`，没有再次调用付费 Provider，也未触发 GitHub-hosted Actions。详细实现及验证说明见[最终技术方案第 21 节](museflow-final-technical-design.md#2026-09-25-至-2026-09-26-最终行为更新验证)。
 
 ## 总体限制
 
