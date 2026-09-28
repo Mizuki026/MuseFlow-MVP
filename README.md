@@ -1,6 +1,6 @@
 # MuseFlow
 
-MuseFlow 是一个面向本机和受信网络的图像生成工作流演示项目。它包含任务恢复、参考素材校验、任务历史、不可变结果和 Provider 适配器。默认 Compose 使用 DashScope Wan 真实 Provider，支持文生图和图生图；创建任务会调用 Provider 并可能产生费用。运行前需配置 `DASHSCOPE_API_KEY` 与获准的 `DASHSCOPE_API_HOST`。自动化测试显式使用 MockProvider，不发送真实 Provider 请求。MuseFlow 没有用户认证或公网滥用防护，**不得直接暴露到公网**。
+MuseFlow 是一个面向本机和受信网络的图像生成工作流项目。它包含任务恢复、参考素材校验、任务历史、不可变结果和 Provider 适配器。默认 Compose 使用 DashScope Wan 真实 Provider，支持文生图和图生图；创建任务会调用 Provider 并可能产生费用。运行前需配置 `DASHSCOPE_API_KEY` 与获准的 `DASHSCOPE_API_HOST`。自动化测试显式使用 MockProvider，不发送真实 Provider 请求。MuseFlow 没有用户认证或公网滥用防护，**不得直接暴露到公网**。
 
 ## 一条命令启动
 
